@@ -35,7 +35,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `RayDock Setup <版本> amd64.exe` | 安装版，按向导安装 |
+| `RayDock-Setup-<版本>-amd64.exe` | 安装版，按向导安装 |
 | `RayDock-<版本>-windows-amd64-portable.zip` | 绿色版，完整解压后运行 `RayDock.exe` |
 | `RayDock-<版本>-SHA256SUMS.txt` | 文件校验清单 |
 
