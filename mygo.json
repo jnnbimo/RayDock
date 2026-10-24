@@ -1,0 +1,7 @@
+{
+  "name": "RayDock",
+  "identifier": "com.example.raydock",
+  "version": "0.1.0",
+  "out": "build",
+  "resources": ["LICENSE", "THIRD_PARTY_NOTICES.txt"]
+}

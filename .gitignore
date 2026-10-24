@@ -1,0 +1,15 @@
+# Build output and downloaded runtime assets
+/build/
+/resources/windows-*/
+
+# Local credentials and user state
+.env
+.env.*
+/state.json
+/state.json.*
+
+# Editor and OS files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
