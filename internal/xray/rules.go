@@ -30,14 +30,7 @@ func (e LineError) Error() string {
 
 var domainPrefixes = []string{"domain:", "full:", "regexp:", "keyword:", "geosite:", "dotless:", "ext:"}
 
-// ParseRules parses one rule per line:
-//
-//	google.com                         domain and subdomains (domain:google.com)
-//	full: keyword: regexp: geosite:    Xray domain matchers
-//	1.2.3.4, 10.0.0.0/8, geoip:cn      IPs and ranges
-//	process:chrome.exe, chrome.exe     process name or full path
-//
-// Blank lines and lines starting with # are ignored.
+// ParseRules reads domain/IP/process matchers, one per line, skipping blanks and # comments.
 func ParseRules(text string) (RuleSet, []LineError) {
 	var rs RuleSet
 	var errs []LineError

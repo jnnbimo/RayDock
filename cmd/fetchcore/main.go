@@ -1,11 +1,5 @@
-// fetchcore downloads the official Xray core into the installer resources before packaging:
-//
-//	go run ./cmd/fetchcore   # writes resources/windows-amd64/core
-//	go tool mygo build
-//
-// It shares RayDock's download code (latest non-draft release, SHA-256 checked against .dgst)
-// and skips the download when a working core is present, unless -force is given. The rule data of the
-// package is replaced by Loyalsoldier/v2ray-rules-dat's, which RayDock updates from (see xray.GeoFiles).
+// fetchcore prepares the official core and full Loyalsoldier rules for packaging.
+// Existing usable resources are kept unless -force is set.
 package main
 
 import (

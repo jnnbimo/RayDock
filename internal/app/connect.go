@@ -226,9 +226,7 @@ func (a *App) RestartAsAdmin() error {
 	return a.RelaunchAdmin(a.ConnectTarget() != "")
 }
 
-// ConnectTarget is the node connecting without picking one uses (the power button, the tray, connecting
-// on start): the one selected in the list; with none selected, or once it is gone, the one last connected
-// to; "" when neither exists.
+// ConnectTarget prefers the selected node, then the last connected node; empty means neither exists.
 func (a *App) ConnectTarget() string {
 	for _, id := range []string{a.State.SelectedID, a.State.LastID} {
 		if a.NodeByID(id) != nil {
@@ -238,8 +236,7 @@ func (a *App) ConnectTarget() string {
 	return ""
 }
 
-// Reconnect applies the current settings and node while connected, beside the running cores; only the
-// TUN restarts them.
+// Reconnect applies pending settings; only TUN changes require restarting both cores.
 func (a *App) Reconnect() {
 	if a.Conn != StateOff && a.ActiveID != "" {
 		a.Connect(a.ActiveID, nil)
@@ -252,8 +249,7 @@ func (a *App) Restart() {
 	a.Reconnect()
 }
 
-// RenewCores runs the cores on a new backend core, beside the old one, which finishes its connections:
-// after new rule data or a new core, which a core reads when it starts.
+// RenewCores replaces the backend to load new core files or rule data.
 func (a *App) RenewCores() {
 	switch r := a.run; {
 	case a.Conn == StateOff:
@@ -265,8 +261,7 @@ func (a *App) RenewCores() {
 	}
 }
 
-// SetMode switches the routing mode, at once while connected: the mode alone is switched into the running
-// cores, leaving other changed settings for a reconnect.
+// SetMode applies only the routing mode, leaving other pending settings untouched.
 func (a *App) SetMode(mode string) {
 	a.State.Settings.Mode = mode
 	a.Save()
@@ -279,8 +274,7 @@ func (a *App) SetMode(mode string) {
 	a.Reconnect()
 }
 
-// pending reports whether the settings differ from those the connection's cores run, so that they take
-// effect on reconnecting; a start in progress counts as running older ones.
+// pending compares settings with committed core configs; an in-flight start counts as pending.
 func (a *App) pending() bool {
 	if a.Conn == StateOff {
 		return false
@@ -321,8 +315,7 @@ func (a *App) SyncProxy() {
 	}
 }
 
-// enableProxy takes over the system proxy, saving the previous settings and the address it writes to disk
-// first, so that a failed write or a crash can be recovered at next start.
+// Persist both proxy addresses before writing so failures and crashes remain recoverable.
 func (a *App) enableProxy() {
 	a.ProxyErr = ""
 	addr := a.ProxyAddr()
@@ -394,7 +387,6 @@ func (a *App) CleanStaleProxy() {
 	}
 }
 
-// chainLabel describes a chain as "A → B → C".
 func chainLabel(chain []*node.Node) string {
 	names := make([]string, len(chain))
 	for i, n := range chain {

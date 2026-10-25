@@ -24,10 +24,7 @@ var pages = []page{
 	{"/settings", "设置", icSliders},
 }
 
-// Shared layout sizes keep every page aligned: every page's content is padPage from the window's edges,
-// its blocks gapBlock apart; every control of a toolbar row is controlHeight high; the content of every
-// pane starts paneInset in from its edge. The sidebar's boxes are sideInset from its edges, their content
-// sideInset more, and its bottom lines up with the pages'.
+// Shared layout dimensions in DIPs.
 const (
 	padPage       = 24
 	gapBlock      = 16
@@ -87,9 +84,8 @@ func New(a *app.App) *View {
 	}
 }
 
-// SoftwareRendering reports whether the last frame used software rendering.
-// The window can retain its view in the tray to avoid rebuilding text and images.
-// Like the view, this is read only on the UI thread.
+// SoftwareRendering reports the last frame's renderer; UI thread only.
+// Software-rendered windows retain their view while hidden in the tray.
 func (a *View) SoftwareRendering() bool { return a.software }
 
 // Build builds the window content.
@@ -147,8 +143,7 @@ func (a *View) sidebar(c *ui.Context) {
 	})
 }
 
-// navigation lists the pages. It is built here rather than with ui.Sidebar, which paints its icons and
-// focused choice in the accent: the page shown is a capsule of colorless glass (chosen).
+// Build from base widgets to keep the selected page colorless.
 func (a *View) navigation(c *ui.Context) {
 	p, t := a.pal, a.theme
 	ui.Column(c).Grow(1).Gap(t.Space(0.5)).Padding(t.Space(2.5), 0).Label("页面").Children(func() {
@@ -178,7 +173,6 @@ func (a *View) navigation(c *ui.Context) {
 	})
 }
 
-// topBar shows global notices in the title bar area: core progress, core errors and pending reconnects.
 func (a *View) topBar(c *ui.Context) {
 	p := a.pal
 	bar := c.TitleBar()
@@ -239,8 +233,7 @@ func (a *View) togglePower(c *ui.Context) {
 	a.connect(c, id)
 }
 
-// connect connects to node id from the window, telling about a failure the connect reports at once
-// (except a missing elevation, which opens its own dialog).
+// connect also surfaces immediate errors and elevation prompts.
 func (a *View) connect(c *ui.Context, id string) {
 	a.Connect(id, c.Toast)
 	if a.ConnErr != "" && !a.AdminPrompt {
@@ -248,7 +241,6 @@ func (a *View) connect(c *ui.Context, id string) {
 	}
 }
 
-// adminDialog explains why TUN needs admin rights and offers an elevated restart.
 func (a *View) adminDialog(c *ui.Context) {
 	p := a.pal
 	a.dialog(c, &a.AdminPrompt, dialog{width: 460, title: "TUN 模式需要管理员权限", icon: icShield, tone: p.warning, err: &a.adminErr,

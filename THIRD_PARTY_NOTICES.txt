@@ -26,7 +26,7 @@ Upstream data and input lists may carry additional attribution requirements;
 see the upstream project and its referenced data sources.
 
 
-github.com/ebitengine/purego v0.11.1
+github.com/ebitengine/purego v0.11.2
 ========================================================================
 
                                  Apache License
@@ -232,7 +232,7 @@ github.com/ebitengine/purego v0.11.1
    limitations under the License.
 
 
-github.com/egoist/mygo v0.6.2
+github.com/egoist/mygo v0.6.3
 ========================================================================
 
 MIT License

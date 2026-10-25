@@ -101,8 +101,7 @@ func Load(path string) (State, error) {
 	return st, nil
 }
 
-// migrateGroups puts every node in a group. Before 0.3 only subscriptions were groups ("subscriptions",
-// nodes' "subId") and manually added nodes had none; those now go to a normal group.
+// migrateGroups maps legacy subscriptions and ungrouped nodes to groups.
 func migrateGroups(st *State, data []byte) {
 	var legacy struct {
 		Subs  []Group `json:"subscriptions"`

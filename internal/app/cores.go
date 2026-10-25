@@ -16,23 +16,15 @@ import (
 	"raydock/internal/xray"
 )
 
-// The connection and the dedicated ports run on two cores (see package xray): the front core, which
-// programs reach (the local port, the TUN, the dedicated ports), and the backend core, which resolves,
-// routes and reaches the nodes. They run while connected or while a dedicated port is set. The front core
-// restarts only when the TUN comes, goes or changes. Anything else is applied beside what runs (apply):
-// other routing rules are switched into the backend core through its API; anything else it runs takes a
-// new backend core, started beside the old one, the front core switched over to it through its API.
-// Programs see no port close. The old backend core finishes the connections it carries before it stops
-// (drainCore), unless the user picked another node or disconnected: then it stops at once, so that what
-// was proxied goes through the new node, or nowhere.
+// The front core owns local, TUN and dedicated inbounds; the backend resolves and routes.
+// Only TUN changes restart the front. Routing uses the API; other changes replace the backend.
+// Retired backends drain existing connections, except on manual switching or disconnect.
 
-// frontCore is the front core as planned: started with or switched to cfg.
 type frontCore struct {
 	cfg []byte
 	f   xray.Front
 }
 
-// runningCore is the backend core as planned: started with or switched to cfg.
 type runningCore struct {
 	core     *xray.Core
 	cfg      []byte
@@ -41,22 +33,17 @@ type runningCore struct {
 	switches int
 }
 
-// change is how a change applied beside the running cores treats them.
 type change struct {
 	renew bool // a new backend core even with the same config: new rule data, a new core
 }
 
-// Draining cores stop once no connection is left on their relay ports, polled every drainPoll, or after
-// drainLimit: a connection still open then (a download, a stream) ends with them. Idle connections count
-// too, and browsers and messengers keep theirs open for minutes, so drainLimit is mostly what a draining
-// core lasts: short, for the memory it holds; the programs reconnect through the new core.
+// Draining backends stop when idle or after drainLimit, including idle keep-alive connections.
 var (
 	drainPoll  = 2 * time.Second
 	drainLimit = 30 * time.Second
 )
 
-// coreSet holds the backend core processes, those finishing their connections too, for ending them all
-// from the core operations.
+// coreSet owns active and draining backends.
 type coreSet struct {
 	mu    sync.Mutex
 	cores []*xray.Core
@@ -91,11 +78,9 @@ func (s *coreSet) take(keep ...*xray.Core) []*xray.Core {
 	return out
 }
 
-// newCore returns a core process, logging to the app's log.
 func (a *App) newCore() *xray.Core { return &xray.Core{OnLog: a.QueueLog} }
 
-// startBackend starts backend core r of the cores seq. Its exit by itself, while it is the one planned,
-// ends them (pairExited). Core operations only.
+// startBackend reports exits only for the current planned pair. Core queue only.
 func (a *App) startBackend(r *runningCore, seq int) error {
 	a.procs.add(r.core)
 	err := r.core.StartWithExit(a.coreExe(), filepath.Join(a.DataDir, "config.json"), r.cfg, func(err error) {
@@ -111,8 +96,7 @@ func (a *App) startBackend(r *runningCore, seq int) error {
 	return err
 }
 
-// tunLocal returns the physical interface the backend core reaches the network through under TUN, whose
-// routes would otherwise take its connections; nil without TUN, where the routes decide.
+// tunLocal binds backend traffic and node DNS to the physical interface under TUN.
 func (a *App) tunLocal(o xray.Options) (*xray.Local, error) {
 	if !o.TUN.Enabled {
 		return nil, nil
@@ -125,8 +109,7 @@ func (a *App) tunLocal(o xray.Options) (*xray.Local, error) {
 	return &l, nil
 }
 
-// backendFor returns what a backend core connecting through chain (nil for none) with opts and serving
-// the dedicated ports is built with, its relay ports aside.
+// backendFor snapshots chains and dedicated routes for a planned backend.
 func (a *App) backendFor(chain []*node.Node, opts xray.Options) (xray.Backend, error) {
 	b := xray.Backend{Chain: copyChain(chain), Ports: a.portRoutes()}
 	for i := range b.Ports {
@@ -153,7 +136,6 @@ func copyChain(chain []*node.Node) []*node.Node {
 	return out
 }
 
-// newBackend returns a backend core for opts and b, on free ports.
 func newBackend(opts xray.Options, b xray.Backend) (*runningCore, error) {
 	var err error
 	if b.Mixed, err = freePort(); err != nil {
@@ -175,7 +157,6 @@ func newBackend(opts xray.Options, b xray.Backend) (*runningCore, error) {
 	return &runningCore{cfg: cfg, opts: opts, b: b}, nil
 }
 
-// newFront returns the front core handing over to backend core run.
 func (a *App) newFront(run *runningCore) (*frontCore, error) {
 	f := &frontCore{f: xray.Front{Backend: run.b, PortsLAN: a.State.Settings.AllowLAN, Gen: 1}}
 	var err error
@@ -186,10 +167,8 @@ func (a *App) newFront(run *runningCore) (*frontCore, error) {
 	return f, err
 }
 
-// coreTarget is a state of the cores. Changes are planned on the UI thread (apply) as the target the cores
-// are to reach, and carried out among the core operations (reconcile), which bring what runs to the newest
-// one: a target replaced before its turn is never carried out, and each is reached from what actually
-// runs, not from what was planned before it. Its fields are not changed once set.
+// coreTarget is immutable: the UI plans it and the core queue reaches it.
+// Superseded plans are applied from live state, not earlier unexecuted plans.
 type coreTarget struct {
 	seq     int    // the cores' pairSeq
 	connSeq int    // the connection's connSeq
@@ -204,14 +183,13 @@ type coreTarget struct {
 	drains context.Context // ends the cores finishing their connections with the cores
 }
 
-// mergeTarget carries into t what target old, replaced before it was carried out, asked for.
 func mergeTarget(old, t *coreTarget) {
 	if old.seq == t.seq {
 		t.drain = t.drain && old.drain
 	}
 }
 
-// newPair invalidates whatever was planned or is being started for the cores: they start afresh or stop.
+// newPair cancels work planned for the previous pair.
 func (a *App) newPair() {
 	a.pairSeq++
 	a.pairCancel()
@@ -219,10 +197,8 @@ func (a *App) newPair() {
 	a.resetDrains()
 }
 
-// startPair starts the cores of target t afresh, after the core operations queued before: the backend
-// core, then the front core, which takes over from the one running, if any. Whatever ran before stops once
-// they run: this is a start, or a restart for the TUN. done runs on the UI thread with the outcome, unless
-// the cores were started again or stopped meanwhile.
+// startPair queues a fresh backend/front pair and retires the previous pair.
+// done runs on the UI thread only while this pair is still current.
 func (a *App) startPair(t *coreTarget, done func(error)) {
 	a.newPair()
 	t.seq, t.ctx, t.drains = a.pairSeq, a.pairCtx, a.drainCtx
@@ -292,8 +268,7 @@ func (a *App) stopPair() {
 	})
 }
 
-// pairExited ends the cores of pair seq after one of them exited by itself: the connection ends, the
-// dedicated ports starting again on new cores; without a connection, the dedicated ports stop.
+// pairExited ends the current pair; dedicated ports restart only after a connection ends.
 func (a *App) pairExited(seq int, err error) {
 	if seq != a.pairSeq {
 		return
@@ -307,10 +282,8 @@ func (a *App) pairExited(seq int, err error) {
 	a.markPorts("已停止：" + err.Error())
 }
 
-// apply brings the running cores to node n (through chain; nil for no connection) and opts beside them,
-// (see the top of this file), as ch says: it plans the cores' next state on what was planned before and
-// sets it as their target (reconcile). It reports false when only a restart can: the TUN comes, goes or
-// changes.
+// apply queues a target beside the running cores; false means the TUN requires a restart.
+// Plans are coalesced by reconcile and remain separate from live state.
 func (a *App) apply(n *node.Node, chain []*node.Node, opts xray.Options, toast func(string), ch change) bool {
 	r, f := a.run, a.frontRun
 	fail := func(err error) bool {
@@ -422,7 +395,6 @@ func (a *App) apply(n *node.Node, chain []*node.Node, opts xray.Options, toast f
 	return true
 }
 
-// logConnect logs a connection to n, through chain, being made.
 func (a *App) logConnect(n *node.Node, chain []*node.Node, opts xray.Options) {
 	a.QueueLog(fmt.Sprintf("[RayDock] 连接 %s（%s）", n.Label(), n.Address()))
 	if len(chain) > 1 {
@@ -433,11 +405,8 @@ func (a *App) logConnect(n *node.Node, chain []*node.Node, opts xray.Options) {
 	}
 }
 
-// reconcile brings the cores from what they run to target t: it starts the backend core t has and the
-// running ones lack, switches the running backend and front cores through their API, then lets the
-// backend core replaced finish its connections, or stops it. Should the core fail to start, what runs
-// stays as it was; should an API call fail, what runs is unknown and the cores restart. Core operations
-// only.
+// reconcile reaches a target from live state. Startup failure preserves the old pair;
+// API failure makes the state uncertain and requires a restart. Core queue only.
 func (a *App) reconcile(t *coreTarget) {
 	live := a.live
 	if live == nil || live.seq != t.seq {
@@ -506,7 +475,6 @@ func (a *App) reconcile(t *coreTarget) {
 	a.Post(func() { a.applied(t) })
 }
 
-// applied takes note that the cores run target t.
 func (a *App) applied(t *coreTarget) {
 	if t.seq != a.pairSeq {
 		return
@@ -532,10 +500,8 @@ func (a *App) applied(t *coreTarget) {
 	a.changed()
 }
 
-// applyFailed reports that the cores could not reach target t. When what ran was left as it was (clean),
-// the cores go on with it (live) and changes planned since were planned on t: unless one of them will be
-// carried out, the plan returns to what runs, its node and settings shown again as such. Otherwise the
-// cores restart.
+// applyFailed restores the live plan after a clean failure unless a newer plan exists.
+// A partially applied change requires a full restart.
 func (a *App) applyFailed(t, live *coreTarget, err error, clean bool) {
 	if t.seq != a.pairSeq {
 		return
@@ -578,7 +544,6 @@ func (a *App) applyFailed(t, live *coreTarget, err error, clean bool) {
 	}
 }
 
-// restartPair starts the cores afresh: what runs is unknown after a change failed halfway.
 func (a *App) restartPair() {
 	if a.Conn != StateOff {
 		a.Restart()
@@ -588,8 +553,7 @@ func (a *App) restartPair() {
 	a.syncIdle(change{})
 }
 
-// drainCore lets c, a backend core no longer used, finish the connections it took on ports, then stops it:
-// once none is left, after drainLimit at the latest, or when ctx ends with the cores.
+// drainCore stops a retired backend when idle, canceled, or past drainLimit.
 func (a *App) drainCore(ctx context.Context, c *xray.Core, ports ...int) {
 	ports = slices.DeleteFunc(ports, func(p int) bool { return p == 0 })
 	a.drains.Add(1)
@@ -620,8 +584,7 @@ func (a *App) resetDrains() {
 	a.drainCtx, a.drainCancel = context.WithCancel(a.workCtx)
 }
 
-// stopCores stops the front core first, so programs see the cores end at once, then the backend cores.
-// Core operations only.
+// stopCores closes the front listener before retiring every backend. Core queue only.
 func (a *App) stopCores() {
 	a.live = nil
 	a.front.Stop()
@@ -640,14 +603,12 @@ func (a *App) endTUN() {
 	}
 }
 
-// sameJSON reports whether x and y encode alike: chains and ports of copied nodes.
 func sameJSON(x, y any) bool {
 	bx, errX := json.Marshal(x)
 	by, errY := json.Marshal(y)
 	return errX == nil && errY == nil && bytes.Equal(bx, by)
 }
 
-// servesPort reports whether b serves dedicated port port.
 func servesPort(b xray.Backend, port int) bool {
 	return slices.ContainsFunc(b.Ports, func(r xray.PortRoute) bool { return r.Port == port })
 }

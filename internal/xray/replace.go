@@ -8,12 +8,9 @@ import (
 	"strings"
 )
 
-// commitFiles replaces one verified set of *.new files. Old files are moved aside
-// first; a failed move/install rolls the entire set back. Rollback failures retain
-// the backup directory and are returned with the original error, never hidden.
-// Files in use may be replaced too: Windows lets a running executable or loaded
-// library be moved, not deleted, so its backup directory stays until a later
-// commit finds it unused and removes it.
+// commitFiles installs a verified *.new set and rolls back on failure.
+// Rollback errors retain the backup and accompany the original error.
+// Running Windows binaries can be moved but not deleted; retire backups later.
 func commitFiles(staged []string) error {
 	if len(staged) == 0 {
 		return nil

@@ -8,15 +8,11 @@ import (
 	"slices"
 )
 
-// The front core holds what programs see: the local port, the TUN and the dedicated ports. It routes
-// nothing itself: it hands every connection to the backend core over loopback (Backend.Mixed and TUN), as
-// the relay user that says which of RayDock's process rules it matched, since only the front core sees the
-// program behind it, or which dedicated port it came in by. It restarts only for the TUN; anything else it
-// runs, the local port, LAN access, the dedicated ports, the process rules and the backend core it hands
-// over to, is switched in through its API (FrontParts).
+// The front owns local, TUN and dedicated inbounds. Process rules run here because
+// only it sees the originating program; relay users carry matches to the backend.
+// All changes except TUN reconfiguration use FrontParts.
 
-// relayUsers are the users a front core hands connections over as, named after the backend outbound
-// the matched process rule sends them to; plain matched none. Each dedicated port has one too (portUser).
+// Relay users identify the matched backend outbound; plain means no process rule matched.
 var relayUsers = []struct{ email, id string }{
 	{"plain", relayID},
 	{tagProxy, "6f1b3a52-8d0e-4c47-9a1e-2b5d7c3e9f11"},
@@ -24,7 +20,6 @@ var relayUsers = []struct{ email, id string }{
 	{tagBlock, "6f1b3a52-8d0e-4c47-9a1e-2b5d7c3e9f13"},
 }
 
-// relayUserID returns the VLESS ID of relay user email.
 func relayUserID(email string) string {
 	for _, u := range relayUsers {
 		if u.email == email {
@@ -142,8 +137,7 @@ func BuildFront(o Options, f Front) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// mixedTag tags the local port's inbound by what it is, so that a front core switched to another port or
-// listen address runs the new inbound beside the old one until it is removed.
+// Include the listen address in tags so replacement inbounds can briefly coexist.
 func mixedTag(o Options) string {
 	if o.AllowLAN {
 		return fmt.Sprintf("%s-%d-lan", tagMixed, o.Port)
@@ -151,8 +145,7 @@ func mixedTag(o Options) string {
 	return fmt.Sprintf("%s-%d", tagMixed, o.Port)
 }
 
-// frontBase is a front config without what FrontParts switches: the inbounds but the TUN, the outbounds and
-// the routing rules.
+// frontBase excludes API-switchable sections but retains startup-only configuration.
 func frontBase(cfg []byte) (obj, error) {
 	var m obj
 	if err := json.Unmarshal(cfg, &m); err != nil {
@@ -166,15 +159,12 @@ func frontBase(cfg []byte) (obj, error) {
 	return m, nil
 }
 
-// tunInbounds returns m's TUN inbound when tun, else its other inbounds: the local port and dedicated ports.
 func tunInbounds(m obj, tun bool) []any {
 	ins, _ := m["inbounds"].([]any)
 	return slices.DeleteFunc(slices.Clone(ins), func(in any) bool { return (tagOf(in) == tagTUN) != tun })
 }
 
-// CanSwitchFront reports whether a front core running cur can become one running next through its API
-// (FrontParts): whether they differ in no more than the local port's and dedicated ports' inbounds, the
-// outbounds and the routing rules. The TUN, the log and the API are read at start only.
+// CanSwitchFront rejects changes to startup-only sections: TUN, log and API.
 func CanSwitchFront(cur, next []byte) bool {
 	a, errA := frontBase(cur)
 	b, errB := frontBase(next)
@@ -239,10 +229,8 @@ func FrontParts(cur, next []byte) (FrontSwitch, error) {
 	return s, err
 }
 
-// SwitchFront switches a running front core (FrontParts): the new outbounds are added, the routing replaced
-// in one step to use them, then the new inbounds open and the old outbounds and inbounds go. Until the
-// routing is replaced the old outbounds take the connections, so none goes unrouted; the connections they
-// carry go on after they are removed. An inbound whose port a new one takes leaves it a moment before.
+// SwitchFront installs outbounds before routing, then replaces inbounds and retires old outbounds.
+// Existing connections survive outbound removal; port collisions require closing the old listener first.
 func (p API) SwitchFront(s FrontSwitch) error {
 	if len(s.RemoveFirst) > 0 {
 		if err := p.call(nil, "rmi", s.RemoveFirst...); err != nil {

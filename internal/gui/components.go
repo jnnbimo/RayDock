@@ -18,8 +18,6 @@ func (a *View) savedToast(c *ui.Context, name string) {
 	c.Toast(message)
 }
 
-// pageHeader is the top of every page: its title over a line about it, and its actions at the end, so
-// that every page starts alike.
 func (a *View) pageHeader(c *ui.Context, title, sub string, actions func()) {
 	ui.Row(c).Gap(10).AlignItems(ui.End).Children(func() {
 		ui.Column(c).Gap(4).Grow(1).MinWidth(0).Children(func() {
@@ -32,8 +30,7 @@ func (a *View) pageHeader(c *ui.Context, title, sub string, actions func()) {
 	})
 }
 
-// form lays out a settings group: one item per row, separated by dividers, controls aligned right.
-// It lives for a single build; the Context is passed to each call.
+// form is a single-build settings layout; pass the context to each call.
 type form struct {
 	a *View
 	n int
@@ -77,7 +74,6 @@ func (f *form) row(c *ui.Context, title, desc string, control func()) {
 	})
 }
 
-// block is a full-width row for inputs and text areas.
 func (f *form) block(c *ui.Context, body func()) {
 	f.divider(c)
 	ui.Column(c).Gap(8).Padding(12, paneInset).MinWidth(0).Children(body)
@@ -87,11 +83,6 @@ func (a *View) chip(c *ui.Context, text string, col ui.Color) ui.Element {
 	return ui.Text(c, text).FontSize(11).Bold().TextColor(a.pal.on(col)).Padding(2, 8).Radius(999).Background(col.Alpha(0.16)).SingleLine()
 }
 
-// Everything clicked to act shows the hand, as on the web; MyGo leaves its controls at the arrow, so the
-// helpers below set it, and controls built here from MyGo's bases set it too.
-
-// button and primaryButton are controlHeight high, as every control of a toolbar or a dialog's footer;
-// a compact one gives its own height.
 func button(c *ui.Context, label string) ui.Element {
 	return glassButton(c, ui.Button(c, label), false).Height(controlHeight).Cursor(ui.CursorPointer)
 }
@@ -100,9 +91,6 @@ func primaryButton(c *ui.Context, label string) ui.Element {
 	return glassButton(c, ui.PrimaryButton(c, label), true).Height(controlHeight).Cursor(ui.CursorPointer)
 }
 
-// switchControl is a switch in the look of the buttons: a capsule of colorless glass with the button's
-// rim, turning into the prominent button's glass and rim when on, its knob muted off and the text's tone
-// on, as the segmented controls mark their chosen item without a color.
 func switchControl(c *ui.Context, on *bool) ui.Element {
 	t := c.Theme()
 	sw := ui.SwitchBase(c, on).Size(t.Space(9), t.Space(5)).Radius(t.Space(2.5)).Cursor(ui.CursorPointer)
@@ -128,8 +116,7 @@ func switchControl(c *ui.Context, on *bool) ui.Element {
 	})
 }
 
-// segmented picks one of labels with the segmented look of segmentTrack, in place of ui.Segmented,
-// whose segments cannot be given a cursor. It returns the track, for a label, OnChange and Disabled.
+// segmented uses base widgets so each segment can set its cursor.
 func segmented(c *ui.Context, selected *int, labels ...string) ui.Element {
 	t := c.Theme()
 	seg := ui.SegmentedBase(c, selected, len(labels))
@@ -155,15 +142,13 @@ func primaryIconButton(c *ui.Context, ic *ui.SVG, label string) ui.Element {
 	})
 }
 
-// toolButton is a square icon button; label is its tooltip and accessible name.
 func toolButton(c *ui.Context, ic *ui.SVG, label string, col ui.Color) ui.Element {
 	return button(c, "").Label(label).Tooltip(label).Size(controlHeight, controlHeight).Padding(0).Center().Children(func() {
 		ui.Icon(c, ic).FontSize(15).TextColor(col)
 	})
 }
 
-// field is a one-line input filling its parent. It returns the input itself. changed, when not nil, runs
-// after the user changed value, by typing or by the input's menu.
+// field calls changed after edits from either typing or its context menu.
 func (a *View) field(c *ui.Context, key string, value *string, placeholder string, changed func()) ui.Element {
 	p := a.pal
 	box := ui.Row(c.Key(key)).Height(controlHeight).Gap(8).Padding(0, 10).AlignItems(ui.Center).
@@ -193,8 +178,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 }
 
-// segmentTrack and segmentItem give the segmented look shared by the routing mode control and the
-// page navigations: a light track whose chosen item is a raised pill, controlHeight high as the fields.
 func segmentTrack(t *ui.Theme, track ui.Element) ui.Element {
 	return lift(t.Dark, track.Height(controlHeight).AlignItems(ui.Stretch).Padding(t.Space(0.5)).Gap(t.Space(0.5)).Radius(t.Radius).
 		Material(glass.Glass{Tint: t.Surface}).Border(1, t.Border))
@@ -212,9 +195,7 @@ func segmentItem(t *ui.Theme, item ui.Element, chosen bool) ui.Element {
 	return item
 }
 
-// navTabs switches between views with the segmented look; each tab is sized to its content, which
-// content builds. configure, when set, adds to each tab, as dragging. It returns the tab list, for a
-// label and OnChange.
+// navTabs shares tab styling and lets configure add per-tab behavior.
 func navTabs(c *ui.Context, selected *int, n int, content func(i int), configure func(i int, tab ui.Element)) ui.Element {
 	t := c.Theme()
 	tabs := ui.TabsBase(c, selected, n)

@@ -13,8 +13,7 @@ import (
 	"raydock/internal/store"
 )
 
-// nodeForm is the state of the add/edit node dialog. Fields of the node are edited in place in n; its
-// numbers are edited as floats, as number inputs take them.
+// nodeForm stores dialog state; number inputs require float values.
 type nodeForm struct {
 	open  bool
 	id    string // node edited, "" when adding
@@ -36,7 +35,6 @@ var formProtocols = []string{
 	node.VLESS, node.VMess, node.Trojan, node.Shadowsocks, node.Hysteria2, node.SOCKS, node.HTTP, node.WireGuard,
 }
 
-// newFormNode is an empty node of protocol proto with the defaults its share links have.
 func newFormNode(proto string) node.Node {
 	n := node.Node{Protocol: proto, Port: 443, Network: "tcp", Security: "none"}
 	switch proto {
@@ -59,8 +57,7 @@ func newFormNode(proto string) node.Node {
 	return n
 }
 
-// addGroup returns the group the add dialog puts nodes in: the normal group shown, or "" when there are
-// no groups yet (a default group is created). ok is false when the group shown is a subscription.
+// addGroup rejects subscription groups; an empty ID creates the default group.
 func (a *View) addGroup() (id string, ok bool) {
 	g := a.GroupByID(a.group)
 	switch {
@@ -104,7 +101,6 @@ func (a *View) setFormNode(n node.Node) {
 	f.port, f.aid, f.mtu, f.hop = float64(n.Port), float64(n.AlterID), float64(n.MTU), float64(n.HopInterval)
 }
 
-// formNode returns the node the form describes.
 func (f *nodeForm) formNode() node.Node {
 	n := f.n
 	n.Port, n.AlterID, n.MTU, n.HopInterval = int(f.port), int(f.aid), int(f.mtu), int(f.hop)
@@ -156,7 +152,6 @@ func (a *View) nodeDialog(c *ui.Context) {
 	a.dialog(c, &f.open, d)
 }
 
-// saveNodeButton imports the links pasted, or adds or saves the node filled in.
 func (a *View) saveNodeButton(c *ui.Context) {
 	f := &a.nf
 	switch {
@@ -195,7 +190,6 @@ func (a *View) saveNodeButton(c *ui.Context) {
 	}
 }
 
-// showAddedGroup shows the group nodes were added to: group, or the default group just created.
 func (a *View) showAddedGroup(group string) {
 	if group == "" {
 		for _, g := range a.State.Groups {
@@ -217,7 +211,6 @@ func (a *View) pasteForm(c *ui.Context) {
 	a.textMenu(c, links, "links", &a.nf.links, true, nil)
 }
 
-// jsonForm edits a node kept as Xray outbound JSON: its name and the outbound.
 func (a *View) jsonForm(c *ui.Context) {
 	f := &a.nf
 	a.fieldRow(c, a.text(c, "node-name", "名称", &f.n.Name, "显示名称"))
@@ -226,7 +219,6 @@ func (a *View) jsonForm(c *ui.Context) {
 		"node-json", &f.json, true, nil)
 }
 
-// nodeFields fills in the settings of the form's protocol.
 func (a *View) nodeFields(c *ui.Context) {
 	f := &a.nf
 	n := &f.n
@@ -294,7 +286,6 @@ func (a *View) nodeFields(c *ui.Context) {
 	}
 }
 
-// transportFields fills in the transport of VLESS, VMess and Trojan.
 func (a *View) transportFields(c *ui.Context) {
 	n := &a.nf.n
 	vmess := n.Protocol == node.VMess // its link carries fewer transport settings
@@ -337,7 +328,6 @@ func (a *View) transportFields(c *ui.Context) {
 	}
 }
 
-// securityFields fills in TLS or REALITY of VLESS, VMess and Trojan.
 func (a *View) securityFields(c *ui.Context) {
 	n := &a.nf.n
 	a.formHeading(c, "安全")
@@ -367,7 +357,6 @@ func (a *View) securityFields(c *ui.Context) {
 	}
 }
 
-// autoPinNote tells which certificate RayDock pinned for a node whose link skips verification.
 func (a *View) autoPinNote(c *ui.Context) {
 	n := &a.nf.n
 	switch {
@@ -384,7 +373,6 @@ func (a *View) formHeading(c *ui.Context, title string) {
 	ui.Text(c, title).FontSize(13).Bold().Margin(4, 0, 0)
 }
 
-// fieldRow lays fields out side by side, sharing the width equally.
 func (a *View) fieldRow(c *ui.Context, fields ...func()) {
 	ui.Row(c).Gap(12).AlignItems(ui.End).Children(func() {
 		for _, field := range fields {
@@ -393,7 +381,6 @@ func (a *View) fieldRow(c *ui.Context, fields ...func()) {
 	})
 }
 
-// text, number and pick build a labeled field for fieldRow.
 func (a *View) text(c *ui.Context, key, label string, value *string, placeholder string) func() {
 	return func() {
 		ui.Text(c, label).FontSize(12.5).TextColor(a.pal.muted).SingleLine()
@@ -408,8 +395,7 @@ func (a *View) number(c *ui.Context, key, label string, value *float64, lo, hi f
 	}
 }
 
-// pick chooses one of values into *value, showing names. A value not among them (from an imported
-// node) is offered as itself, so the form never shows another choice than the node's.
+// pick keeps unknown imported values selectable rather than substituting another value.
 func (a *View) pick(c *ui.Context, key, label string, value *string, values, names []string) func() {
 	return func() {
 		ui.Text(c, label).FontSize(12.5).TextColor(a.pal.muted).SingleLine()
@@ -417,12 +403,8 @@ func (a *View) pick(c *ui.Context, key, label string, value *string, values, nam
 	}
 }
 
-// choice is the window's one drop-down: it chooses one of values into *value, showing names, which are
-// display only, so equal names still choose distinct values. Its options are as wide as it, a name too
-// long ending in an ellipsis and showing whole in a tooltip. They stay in the dialog it is in (popupArea),
-// else in the window: below it, scrolling when they are many, and above it where there is too little room
-// below and more above. Typing while they show goes to the first whose name has what was typed. It
-// reports a new choice.
+// choice selects by value, not label, and keeps options inside the dialog/window.
+// Imported values and duplicate labels remain distinct; typing searches the options.
 func (a *View) choice(c *ui.Context, key, label string, value *string, values, names []string) bool {
 	p, t := a.pal, a.theme
 	if !slices.Contains(values, *value) {
@@ -500,8 +482,7 @@ func (a *View) choice(c *ui.Context, key, label string, value *string, values, n
 	return trigger.Changed()
 }
 
-// The options of a choice, in DIPs: as high as the room on their side allows, within these, and that far
-// from the edge of their area. arrowWidth is the width of the arrow of its field.
+// Drop-down dimensions in DIPs; arrowWidth reserves the trigger arrow.
 const (
 	minOptions  = 160
 	maxOptions  = 320
@@ -517,7 +498,6 @@ type typeahead struct {
 	pending bool // typed since the choice last looked
 }
 
-// add adds the text of ev, typed into the options of choice key. A pause of a second starts over.
 func (ta *typeahead) add(key string, ev ui.InputEvent) {
 	if ta.key != key || ev.Time.Sub(ta.at) > time.Second {
 		ta.text = ""
@@ -525,8 +505,6 @@ func (ta *typeahead) add(key string, ev ui.InputEvent) {
 	ta.key, ta.at, ta.text, ta.pending = key, ev.Time, ta.text+strings.ToLower(ev.Text), true
 }
 
-// take returns the first of names of choice key that has what was typed since it last looked, ignoring
-// case, or -1.
 func (ta *typeahead) take(key string, names []string) int {
 	if !ta.pending || ta.key != key {
 		return -1

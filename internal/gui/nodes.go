@@ -14,13 +14,10 @@ import (
 	"raydock/internal/node"
 )
 
-// colWidths are the widths of the node list's columns but the name's, shared by the header and the rows.
-// Each column is as wide as the widest it shows (nodeColumns); the name takes the rest.
+// colWidths reserves the non-name columns; the name takes the remaining width.
 type colWidths struct{ protocol, port, latency, ip, speed float32 }
 
-// Widest values of the columns showing numbers, so results coming in never widen a column: latency tests
-// give up after 8 s, the exit IP column fits IPv4 (a longer IPv6 is cut, its tooltip shows it all), and
-// rates show as "999.9 MB/s" or "1023 KB/s".
+// Reserve worst-case numeric widths so measurement updates never shift columns.
 var (
 	widestLatency = []string{"9999 ms"}
 	widestIP      = []string{"255.255.255.255"}
@@ -39,8 +36,6 @@ const (
 	sortIcon     = 4 + 11
 )
 
-// protocolParts splits the protocol column's text: the protocol, then its transport and security
-// ("VLESS", " · ws · tls").
 func protocolParts(n *node.Node) (name, transport string) {
 	return n.ProtocolName(), " · " + n.Transport()
 }
@@ -60,9 +55,7 @@ func (a *View) textWidth(c *ui.Context, size float32, weight int, features, text
 	return w
 }
 
-// nodeColumns sizes the columns for the rows shown: each takes the widest of its header and what it can
-// show. Values in the given formats (widest*) are taken at their widest; texts that vary with the nodes
-// (transports, error and progress labels) as the rows have them.
+// nodeColumns reserves numeric widths and measures variable protocol/status text.
 func (a *View) nodeColumns(c *ui.Context, rows []int) colWidths {
 	header := func(label string) float32 { return a.textWidth(c, headerSize, 0, "", label) }
 	widest := func(size float32, features string, texts []string) float32 {
@@ -205,7 +198,6 @@ func (a *View) nodeList(c *ui.Context, rows []int) {
 	a.nodeMenu(c)
 }
 
-// nodeMenuID is the menu id of node id's row.
 func nodeMenuID(id string) string { return "node:" + id }
 
 // nodeMenu draws the open menu of a node row. It is built after the rows, so its actions may remove one.
@@ -247,7 +239,6 @@ func (a *View) nodeMenu(c *ui.Context) {
 	})
 }
 
-// nodeRow builds one row.
 func (a *View) nodeRow(c *ui.Context, n *node.Node, selected bool, w colWidths) {
 	p := a.pal
 	active := n.ID == a.ActiveID
@@ -320,8 +311,7 @@ func (a *View) nodeRow(c *ui.Context, n *node.Node, selected bool, w colWidths) 
 	})
 }
 
-// measuredVia tells, for a node in a group with a front or back proxy, that its tests went through the
-// whole chain; "" for any other node.
+// measuredVia identifies measurements made through the full proxy chain.
 func (a *View) measuredVia(n *node.Node) string {
 	chain, err := a.Chain(n)
 	if err != nil || len(chain) < 2 {
@@ -334,7 +324,6 @@ func (a *View) measuredVia(n *node.Node) string {
 	return "经代理链测得：" + strings.Join(names, " → ")
 }
 
-// ipCell shows the exit IP the last latency test found through the node.
 func (a *View) ipCell(c *ui.Context, id string, width float32, sub ui.Color) {
 	p := a.pal
 	ui.Row(c).Width(width).Shrink(0).MinWidth(0).Children(func() {
@@ -352,7 +341,6 @@ func (a *View) ipCell(c *ui.Context, id string, width float32, sub ui.Color) {
 	})
 }
 
-// speedCell shows download over upload, or the phase of a running test; via is measuredVia.
 func (a *View) speedCell(c *ui.Context, id, via string, width float32, sub ui.Color) {
 	p := a.pal
 	ui.Column(c).Width(width).Shrink(0).Gap(1).AlignItems(ui.End).FontSize(rateSize).FontFeatures("tnum").Children(func() {
@@ -380,7 +368,6 @@ func (a *View) speedCell(c *ui.Context, id, via string, width float32, sub ui.Co
 	})
 }
 
-// joinLines joins the non-empty lines.
 func joinLines(lines ...string) string {
 	return strings.Join(slices.DeleteFunc(lines, func(s string) bool { return s == "" }), "\n")
 }
@@ -419,7 +406,6 @@ func (a *View) groupName(id string) string {
 	return "—"
 }
 
-// visibleNodes returns the indexes of nodes in the group shown, in the order chosen.
 func (a *View) visibleNodes() []int {
 	var out []int
 	for i := range a.State.Nodes {

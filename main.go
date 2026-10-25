@@ -1,10 +1,4 @@
-// RayDock is an Xray-core client with a native MyGo UI.
-//
-// Flags:
-//
-//	--wait-pid=N  wait for process N to exit first (elevated relaunch)
-//	--connect     connect to the node last connected to on start
-//	--autostart   started at logon: stay in the tray
+// RayDock is an Xray client with a native MyGo UI.
 package main
 
 import (
@@ -250,8 +244,7 @@ func applyAppearance(v int) {
 	mygo.Theme.SetSource(sources[v])
 }
 
-// flushLogsLoop hands core output to the UI thread every 200 ms instead of redrawing per line, for as
-// long as RayDock runs, with or without a window.
+// flushLogsLoop batches core output to avoid repainting for every log line.
 func flushLogsLoop(a *app.App, post func(func())) {
 	t := time.NewTicker(200 * time.Millisecond)
 	defer t.Stop()

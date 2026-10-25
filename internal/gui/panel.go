@@ -11,7 +11,6 @@ import (
 	"raydock/internal/node"
 )
 
-// controlPanel is the connection panel at the bottom of the sidebar, on every page.
 func (a *View) controlPanel(c *ui.Context) {
 	p := a.pal
 	p.pane(ui.Column(c).Gap(12).Padding(12).Radius(16)).Shrink(0).Children(func() {
@@ -31,10 +30,7 @@ const (
 	toggleGap = 6
 )
 
-// connectionControls are the connection panel's controls but the local proxy: the state with the power
-// button, the routing mode, the system proxy and TUN. The sidebar's panel and the tray menu show them.
-// fixed gives every row its height (connectionHeight), an error one line: the tray menu's flyout is
-// sized before it draws.
+// Sidebar and tray share these controls; fixed rows let the flyout size itself before painting.
 func (a *View) connectionControls(c *ui.Context, fixed bool) {
 	p := a.pal
 	s := &a.State.Settings
@@ -71,7 +67,6 @@ func (a *View) connectionControls(c *ui.Context, fixed bool) {
 	})
 }
 
-// connectionHeight is the height of the connection controls laid out at a fixed height, gap apart.
 func (a *View) connectionHeight(gap float32) float32 {
 	rows := []float32{rowStatus, rowMode, 2*rowToggle + toggleGap}
 	if a.switchTarget() != nil {
@@ -90,7 +85,6 @@ func (a *View) connectionHeight(gap float32) float32 {
 	return h
 }
 
-// switchTarget is the node selected while connected to another, which the panel offers to switch to.
 func (a *View) switchTarget() *node.Node {
 	if a.Conn == app.StateOff || a.ActiveID == a.State.SelectedID {
 		return nil
@@ -98,7 +92,6 @@ func (a *View) switchTarget() *node.Node {
 	return a.NodeByID(a.State.SelectedID)
 }
 
-// connectionStatus shows the power button and state, and offers to switch to another selected node.
 func (a *View) connectionStatus(c *ui.Context) {
 	p := a.pal
 	var title, sub string

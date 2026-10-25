@@ -79,9 +79,8 @@ type Options struct {
 	APIPort int `json:"-"`
 }
 
-// DefaultOptions avoids the default ports of v2rayN (10808) and Clash (7890) so they can coexist. Domains no
-// rule names are resolved and matched against the IP rules (IPIfNonMatch), so a site outside the domain
-// lists still goes direct when it is hosted in China (geoip:cn).
+// DefaultOptions uses a non-conflicting proxy port and IPIfNonMatch routing.
+// Unmatched domains may still go direct through geoip:cn.
 func DefaultOptions() Options {
 	return Options{
 		Port: 10818, Mode: ModeRule, LogLevel: "warning", DomainStrategy: "IPIfNonMatch",
@@ -101,13 +100,8 @@ var dohHosts = map[string][]string{
 
 type obj = map[string]any
 
-// A connection runs two cores. The front core faces programs: it holds the local port, the TUN and the
-// dedicated ports, and hands everything to the backend core over loopback (BuildFront). The backend core
-// resolves, routes and reaches the nodes (BuildBackend). A new backend core starts beside the old one while
-// the front core is switched over to it through its API: programs never see the local port, the TUN or a
-// dedicated port go away. A new backend core, rather than outbounds switched through its API, also frees
-// what a node's outbound holds: Xray does not close an outbound removed through the API (a WireGuard
-// device, QUIC sessions, mux connections stay until the process ends).
+// Replace backend processes rather than removing outbounds through the API:
+// Xray otherwise retains WireGuard devices, QUIC sessions and mux connections.
 
 // Backend is what a backend core is built with besides the options.
 type Backend struct {
@@ -191,8 +185,7 @@ func BuildBackend(o Options, b Backend) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// buildPortsBackend is the backend core serving the dedicated ports alone, while not connected: it relays
-// each port through its chain and does nothing else. The nodes' addresses are resolved by the system.
+// buildPortsBackend serves only dedicated chains and resolves node addresses through the system.
 func buildPortsBackend(o Options, b Backend) ([]byte, error) {
 	if b.Mixed <= 0 {
 		return nil, errors.New("缺少前端核心的转交端口")
@@ -215,9 +208,7 @@ func buildPortsBackend(o Options, b Backend) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// portRelays returns the outbounds of the dedicated ports' chains, and the rules sending each port's
-// connections, handed over as its user (portUser), through its chain. Under TUN, each chain's first node
-// is dialed through the physical interface, as the connection's.
+// portRelays routes each dedicated relay user through its chain; under TUN, first hops use the physical network.
 func portRelays(b Backend) (outs, rules []any, err error) {
 	for _, r := range b.Ports {
 		chain, err := chainOutbounds(r.Chain, portTag(r.Port))
@@ -231,11 +222,8 @@ func portRelays(b Backend) (outs, rules []any, err error) {
 	return outs, rules, nil
 }
 
-// nodeDNS has the addresses of the nodes dialed first (the connection's and each dedicated port's) resolved
-// under TUN as the system would without it: by the local network's DNS servers, through the physical
-// interface. Never through the proxy, which the remote DNS goes through, and which needs them resolved
-// first: a local server that is the remote DNS too is left out, and with none left the domestic DNS
-// resolves them (viaDirect). It returns the DNS servers for them and the rules sending their queries direct.
+// nodeDNS resolves first-hop addresses directly through the physical network's DNS.
+// Exclude the proxied remote DNS to avoid a bootstrap cycle; if none remain, use domestic DNS.
 func nodeDNS(b Backend, remote dnsServer) (servers, rules []any, viaDirect []string) {
 	if b.Local == nil {
 		return nil, nil, nil
@@ -281,22 +269,19 @@ func dnsStrategy(o Options) string {
 	return "UseIPv4"
 }
 
-// apiConfig opens a core's API on 127.0.0.1:port, for the changes RayDock switches in while it runs.
 func apiConfig(port int) obj {
 	return obj{"tag": "api", "listen": net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 		"services": []string{"HandlerService", "RoutingService"}}
 }
 
-// Local is the physical interface measurements reach the network through, past any TUN, with the DNS
-// servers of the local network.
+// Local binds core and measurement traffic to a physical interface and its DNS.
 type Local struct {
 	Interface string   // interface name for sockopt.interface
 	DNS       []string // server IPs
 	Strategy  string   // UseIP / UseIPv4 / UseIPv6
 }
 
-// direct adds to cfg a freedom outbound bound to the interface and the DNS module with the local servers,
-// whose queries leave through that outbound.
+// direct adds interface-bound freedom and DNS configuration.
 func (l *Local) direct(cfg obj) error {
 	if len(l.DNS) == 0 {
 		return errors.New("本地网络没有 DNS 服务器")
@@ -328,8 +313,7 @@ func probeBase(inbound obj, outbounds []any, rules []any) obj {
 	}
 }
 
-// bind has out, the first node of a chain, dialed through the physical interface and its address resolved
-// by the core's DNS module: nothing without l.
+// bind applies interface-bound resolution to a chain's first hop; nil leaves it unchanged.
 func (l *Local) bind(out any) {
 	if l == nil {
 		return
@@ -338,16 +322,12 @@ func (l *Local) bind(out any) {
 	so["interface"], so["domainStrategy"] = l.Interface, l.strategy()
 }
 
-// The front core reaches the backend core over VLESS, which carries UDP inside its TCP connection. A TUN
-// core binds its own sockets to the physical interface and spares only those whose target is loopback; a
-// UDP socket is set up for no target (0.0.0.0:0), so it is bound too, and Windows then refuses to send from
-// it to 127.0.0.1: relayed over SOCKS, whose UDP goes in datagrams of its own, every proxied datagram (the
-// remote DNS among them) would be lost. Both ends are on loopback, so plain VLESS is enough.
+// VLESS carries relay UDP inside TCP. Under TUN, unconnected UDP sockets bind
+// to the physical interface and cannot send SOCKS UDP datagrams to loopback.
+// Both relay endpoints are local, so encryption is unnecessary.
 const relayID = "6f1b3a52-8d0e-4c47-9a1e-2b5d7c3e9f10"
 
-// BuildProbe returns a minimal config for measurements: per route, a mixed inbound on 127.0.0.1 that
-// sends everything through the route's chain. With local, the first node of each chain is dialed through
-// the local network and its address resolved by the local DNS servers.
+// BuildProbe maps each local mixed port to its chain; local binds first-hop dialing and DNS.
 func BuildProbe(routes []PortRoute, local *Local) ([]byte, error) {
 	inbounds, outbounds, rules, err := portParts(routes, false)
 	if err != nil {
@@ -374,9 +354,8 @@ func Check(n *node.Node) error {
 	return err
 }
 
-// BuildResolver returns a config answering DNS queries on 127.0.0.1:port from the local DNS servers,
-// through the local network. Programs other than Xray may not query DNS outside a strict TUN, so they
-// resolve here.
+// BuildResolver forwards local DNS queries through the physical interface.
+// Strict TUN filtering may prevent non-Xray processes from querying DNS directly.
 func BuildResolver(port int, local Local) ([]byte, error) {
 	if len(local.DNS) == 0 {
 		return nil, errors.New("本地网络没有 DNS 服务器")
@@ -420,8 +399,7 @@ func portParts(routes []PortRoute, allowLAN bool) (inbounds, outbounds, rules []
 	return inbounds, outbounds, rules, nil
 }
 
-// chainOutbounds builds the outbounds of chain, their tags starting with prefix. The last one is tagged
-// prefix+proxy, which routing uses; each one after the first is dialed through the one before it.
+// chainOutbounds tags the final hop as prefix+proxy and dials each hop through its predecessor.
 func chainOutbounds(chain []*node.Node, prefix string) ([]any, error) {
 	if len(chain) == 0 {
 		return nil, errors.New("没有要连接的节点")
@@ -446,7 +424,6 @@ func chainOutbounds(chain []*node.Node, prefix string) ([]any, error) {
 	return list, nil
 }
 
-// chainTags returns the tags chainOutbounds gives a chain of n nodes.
 func chainTags(prefix string, n int) []string {
 	tags := make([]string, n)
 	for i := range n - 1 {
@@ -456,10 +433,8 @@ func chainTags(prefix string, n int) []string {
 	return tags
 }
 
-// dialThrough makes out connect to its server through the outbound tagged via.
 func dialThrough(out obj, via string) { sockopt(out)["dialerProxy"] = via }
 
-// sockopt returns out's streamSettings.sockopt, adding it when missing.
 func sockopt(out obj) obj {
 	stream, _ := out["streamSettings"].(obj)
 	if stream == nil {
@@ -483,10 +458,8 @@ func logLevel(l string) string {
 	return "warning"
 }
 
-// relayInbounds are the backend core's inbounds: one for what the front core's local port and dedicated
-// ports take and, under TUN, one for what its TUN takes, so that rules can tell them apart. Sniffing is done here, where
-// the routing is: the domains of the local port's connections are used for routing only, those of the
-// TUN's also sent on, so that the proxy resolves them rather than a possibly poisoned local DNS.
+// Keep mixed/TUN relays separate for routing. Only TUN sniffing replaces
+// destinations, so proxied domain resolution avoids poisoned local DNS.
 func relayInbounds(o Options, b Backend) []any {
 	var clients []any
 	for _, u := range relayUsers {
@@ -513,7 +486,6 @@ func relayInbounds(o Options, b Backend) []any {
 	return list
 }
 
-// frontInbounds are the front core's inbounds: the local port (tagged tag) and, under TUN, the TUN.
 func frontInbounds(o Options, tag string) []any {
 	list := []any{mixedInbound(o, tag)}
 	if !o.TUN.Enabled {
@@ -553,8 +525,7 @@ func mixedInbound(o Options, tag string) obj {
 	return obj{"tag": tag, "protocol": "socks", "listen": listen, "port": o.Port, "settings": obj{"auth": "noauth", "udp": true}}
 }
 
-// outbounds are the backend core's outbounds; under TUN, local binds its direct connections to the
-// physical interface.
+// Under TUN, direct backend traffic also binds to the physical interface.
 func outbounds(proxies []any, o Options, strategy string, local *Local) []any {
 	sockopt := obj{"domainStrategy": strategy}
 	if local != nil {
@@ -589,10 +560,8 @@ func parseAllRules(o Options) (parsedRules, error) {
 	return p, nil
 }
 
-// routing returns the routing of o; proxied traffic goes to the outbound tagged proxy. Rules naming
-// processes are the front core's (frontRules): it alone sees which program made a connection. It marks
-// what matched them by the relay user it hands the connection over as, and here a rule on that user
-// stands where the process rule would; procs lists them, in their order.
+// Process rules run in the front core. Relay users preserve their match order here;
+// procs carries the corresponding front-core rules.
 func routing(o Options, r parsedRules, direct, remote dnsServer, proxy string) (routes obj, procs []procRule) {
 	var rules []any
 	add := func(tag string, kv ...any) {
@@ -681,8 +650,7 @@ func routing(o Options, r parsedRules, direct, remote dnsServer, proxy string) (
 	return obj{"domainStrategy": ds, "rules": rules}, procs
 }
 
-// dnsConfig is the backend core's DNS module; nodes are the servers for the nodes' addresses (nodeDNS),
-// asked before the others.
+// dnsConfig asks node-address DNS servers before the general resolvers.
 func dnsConfig(o Options, strategy string, direct, remote dnsServer, directDomains []string, user map[string][]string, nodes []any) obj {
 	hosts := obj{}
 	for k, v := range dohHosts {
@@ -908,7 +876,6 @@ var (
 	privateDomains = []string{"lan", "localdomain", "example", "invalid", "localhost", "test", "local", "home.arpa", "internal"}
 )
 
-// publicAddress reports whether Xray takes host as a public address.
 func publicAddress(host string) bool {
 	if ip, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
 		ip = ip.Unmap()
@@ -951,8 +918,7 @@ func wireguard(n *node.Node) (obj, error) {
 	return obj{"tag": tagProxy, "protocol": "wireguard", "settings": settings}, nil
 }
 
-// setFinalMask sets streamSettings.finalmask: the node's fm verbatim when present (it describes every
-// layer the server expects), otherwise the UDP layers generated from other parameters.
+// Keep explicit finalmask layers unchanged; otherwise derive them from legacy fields.
 func setFinalMask(stream obj, fm string, udp []any) error {
 	if fm != "" {
 		var m obj
@@ -1048,9 +1014,7 @@ func streamSettings(n *node.Node) (obj, error) {
 	return s, nil
 }
 
-// kcpMasks turns legacy mKCP headerType and seed into Xray 26 mkcp-legacy layers to reach old servers.
-// A legacy packet is header + encryption (AES-128-GCM with a seed, the default obfuscation otherwise);
-// later finalmask layers are closer to the wire, so encryption comes first and the header last.
+// Legacy mKCP layers are applied encryption-first, header-last, matching their on-wire order.
 func kcpMasks(n *node.Node) []any {
 	security := obj{"type": "mkcp-legacy"}
 	if n.Seed != "" {
@@ -1067,9 +1031,8 @@ func kcpMasks(n *node.Node) []any {
 	return masks
 }
 
-// tlsSettings is the TLS config shared by all protocols; uTLS fingerprints only apply to TCP transports.
-// Xray 26 removed allowInsecure (the core refuses to start with it), so it is never written; certificate
-// pinning or name verification replace it, and Warnings tells the user.
+// tlsSettings never emits removed allowInsecure settings; use pinning or name verification.
+// uTLS fingerprints apply only to TCP transports.
 func tlsSettings(n *node.Node, sni string, utls bool) obj {
 	t := obj{"serverName": sni}
 	if pin := n.Pin(); pin != "" {

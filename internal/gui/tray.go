@@ -12,9 +12,7 @@ import (
 	"raydock/internal/brand"
 )
 
-// trayMenu is the tray icon's menu: a flyout drawn as the window's menus are, glass over the window's
-// backdrop, in place of the system's opaque menu. The flyout is made once, hidden, then shown and hidden:
-// made as the menu opens, a window shows its empty frame before it has drawn.
+// Reuse and pre-render the flyout to avoid an empty frame when opening it.
 type trayMenu struct {
 	*View
 	tray       *mygo.Tray
@@ -37,8 +35,7 @@ type trayState struct {
 	active     string
 }
 
-// Layout of the tray menu, in DIPs: the flyout's size is given as it opens (trayHeight), so every row
-// has a height. Its controls are as wide as those of the sidebar's panel.
+// Fixed flyout dimensions in DIPs.
 const (
 	trayWidth   = 224
 	trayPad     = 6 // around the menu, and again around its connection controls
@@ -47,7 +44,6 @@ const (
 	trayDivider = 9
 )
 
-// trayHeight is the height of the tray menu for the state shown: the connection controls, then two items.
 func (m *trayMenu) trayHeight() float32 {
 	return 4*trayPad + m.connectionHeight(trayGap) + trayDivider + 2*trayItem
 }
@@ -91,7 +87,6 @@ func SetupTray(a *app.App, post func(func()), show, quit func()) *mygo.Tray {
 	return tray
 }
 
-// make creates the flyout, hidden. What closes it, a press elsewhere, Escape or an item, hides it.
 func (m *trayMenu) make() {
 	w := mygo.NewFlyout(mygo.FlyoutOptions{
 		Tray:      m.tray,
@@ -122,7 +117,6 @@ func (m *trayMenu) make() {
 	w.ShowInactive()
 }
 
-// toggle shows the menu next to the icon, or hides it.
 func (m *trayMenu) toggle() {
 	w := m.win
 	if w == nil {
@@ -146,7 +140,6 @@ func (m *trayMenu) close() {
 	}
 }
 
-// then closes the menu and runs fn as the main window's change.
 func (m *trayMenu) then(fn func()) {
 	m.close()
 	m.post(fn)
@@ -187,9 +180,7 @@ func (m *trayMenu) build(c *ui.Context) {
 	})
 }
 
-// follow keeps the menu and the main window in step with what changed since the menu last drew: the
-// window redraws what the menu's controls changed, the flyout takes the height the state shown needs,
-// and the admin prompt, which a control may have raised, shows in the main window.
+// follow synchronizes controls, flyout size and elevation prompts with the main window.
 func (m *trayMenu) follow() {
 	a := m.View
 	s := &a.State.Settings
@@ -215,8 +206,6 @@ func (m *trayMenu) divider(c *ui.Context) {
 	ui.Box(c).Height(1).Margin((trayDivider-1)/2, 6).Background(m.pal.border)
 }
 
-// item is an item of the menu showing label in col; it reports a click. Its label starts where the
-// connection controls do, trayPad in from the menu's padding, past the item's rim.
 func (m *trayMenu) item(c *ui.Context, label string, col ui.Color, disabled bool) bool {
 	p, t := m.pal, m.theme
 	b := choosable(ui.ButtonBase(c.Key("tray-"+label))).Label(label).Role(ui.RoleMenuItem).Cursor(ui.CursorPointer).
@@ -231,7 +220,6 @@ func (m *trayMenu) item(c *ui.Context, label string, col ui.Color, disabled bool
 	return b.Clicked()
 }
 
-// trayIcon is the app logo, in color when connected and gray otherwise.
 func trayIcon(on bool) []byte {
 	if on {
 		return trayOn

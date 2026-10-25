@@ -13,8 +13,7 @@ import (
 	"raydock/internal/xray"
 )
 
-// SetNodePort gives node id a dedicated local port, which proxies through it (and its group's chain)
-// while RayDock runs, whether or not it is connected (see SyncCores). Port 0 removes it.
+// SetNodePort assigns a persistent proxy route, even when disconnected. Zero removes it.
 func (a *App) SetNodePort(id string, port int) error {
 	if a.NodeByID(id) == nil {
 		return errors.New("节点不存在")
@@ -49,11 +48,8 @@ func (a *App) SetNodePort(id string, port int) error {
 	return nil
 }
 
-// SyncCores brings the cores up to date with the nodes, the groups' proxies and the dedicated ports after
-// they changed (edited, updated by a subscription, a certificate pinned, a port set) or the network the
-// backend core reaches them through did: beside the running cores (apply), the connections going on. A
-// start in progress starts again when what it starts changed; one waiting for the core reads them once it
-// is ready. Nothing happens when the cores would stay the same.
+// SyncCores reconciles node, chain, port and network changes with the running pair.
+// In-flight starts restart only when their inputs changed; identical targets do nothing.
 func (a *App) SyncCores() {
 	a.portBasis = portSettings{a.State.Settings.AllowLAN, a.State.Settings.Port}
 	if a.closing {
@@ -84,18 +80,14 @@ func (a *App) startStale(t *coreTarget) bool {
 	return err != nil || !sameJSON(b.Chain, t.run.b.Chain) || !sameJSON(b.Ports, t.run.b.Ports)
 }
 
-// idleOptions are the options the cores serving the dedicated ports alone run with: the TUN only comes
-// with a connection.
 func (a *App) idleOptions() xray.Options {
 	o := a.xrayOptions()
 	o.TUN.Enabled = false
 	return o
 }
 
-// syncIdle has the cores serve the dedicated ports while not connected: started, switched or stopped as
-// the ports come, change and go, and after a connection ended. While the core files are checked or
-// replaced nothing new starts from them: what the connection ran stops, the dedicated ports stay on what
-// runs until the core is ready (coreDone). UI only.
+// syncIdle serves dedicated ports without a connection. New cores wait for file installation;
+// existing dedicated routes keep running while the files are replaced. UI thread only.
 func (a *App) syncIdle(ch change) {
 	routes := a.portRoutes()
 	if len(routes) == 0 || a.closing {
@@ -140,8 +132,7 @@ func (a *App) syncIdle(ch change) {
 	})
 }
 
-// holdPorts notes the dedicated ports the front core of t takes: they are RayDock's, not another
-// program's (portTaken).
+// holdPorts reserves planned front-core ports so portTaken recognizes them as ours.
 func (a *App) holdPorts(t *coreTarget) {
 	if t == nil {
 		return
@@ -154,16 +145,14 @@ func (a *App) holdPorts(t *coreTarget) {
 	}
 }
 
-// heldPorts notes the dedicated ports anew, once the front core runs live (nil when stopped): those it
-// runs and those planned.
+// heldPorts combines live and planned port ownership.
 func (a *App) heldPorts(live *coreTarget) {
 	clear(a.frontPorts)
 	a.holdPorts(live)
 	a.holdPorts(a.planned)
 }
 
-// portTaken reports whether another program listens on port, which the front core then could not take:
-// such a port is left out, rather than the cores failing with it, the connection included.
+// portTaken excludes foreign listeners so one occupied port cannot break the whole pair.
 func (a *App) portTaken(port int) bool {
 	if a.frontPorts[port] {
 		return false
@@ -180,7 +169,6 @@ func (a *App) portTaken(port int) bool {
 	return false
 }
 
-// notePorts logs the dedicated ports the cores serve, once they change.
 func (a *App) notePorts(t *coreTarget) {
 	if t.served == a.servedPorts {
 		return
@@ -231,8 +219,7 @@ func (a *App) portRoutes() []xray.PortRoute {
 	return routes
 }
 
-// describePorts lists routes as "port → node" for the log. The node is the one the port belongs to, not
-// the last of its chain, which is the group's back proxy when there is one.
+// describePorts names the owning node, not the final node in its proxy chain.
 func (a *App) describePorts(routes []xray.PortRoute) string {
 	served := make([]string, 0, len(routes))
 	for _, r := range routes {
@@ -247,7 +234,6 @@ func (a *App) describePorts(routes []xray.PortRoute) string {
 	return strings.Join(served, "，")
 }
 
-// markPorts records reason for every dedicated port not already failing on its own.
 func (a *App) markPorts(reason string) {
 	for id := range a.State.Ports {
 		if a.PortErrs[id] == "" {

@@ -17,9 +17,8 @@ const noProxy = "不使用"
 // groupDrag is the value a dragged group tab carries: its ID.
 type groupDrag string
 
-// groupForm is the state of the add/edit group dialog. Front and back hold the IDs of the proxies
-// chosen, "" for none: labels only show them, as a subscription updated while the dialog is open may
-// give a label to another node. A proxy whose node is gone stays chosen, and saving asks for another.
+// Proxy selections use stable node IDs, not labels. Missing nodes stay selected
+// until the user replaces or explicitly clears them.
 type groupForm struct {
 	open        bool
 	id          string // "" when adding
@@ -29,7 +28,6 @@ type groupForm struct {
 	err         string // the error of the last save, or the proxies of the group whose nodes are gone
 }
 
-// groupTabs chooses the group shown, each with its node count.
 func (a *View) groupTabs(c *ui.Context) {
 	p := a.pal
 	if len(a.State.Groups) == 0 {
@@ -88,7 +86,6 @@ func (a *View) groupTabs(c *ui.Context) {
 	}
 }
 
-// groupBar describes the group shown and holds its actions.
 func (a *View) groupBar(c *ui.Context, g *store.Group) {
 	p := a.pal
 	id := g.ID
@@ -145,7 +142,6 @@ func (a *View) groupStatus(g *store.Group) (string, ui.Color) {
 	return status, p.muted
 }
 
-// chainChips shows the group's front and back proxies.
 func (a *View) chainChips(c *ui.Context, g *store.Group) {
 	p := a.pal
 	for _, x := range []struct{ id, what string }{{g.Front, "前置"}, {g.Back, "后置"}} {
@@ -160,8 +156,7 @@ func (a *View) chainChips(c *ui.Context, g *store.Group) {
 	}
 }
 
-// proxyOptions lists the nodes that can be a proxy of group id (those of other groups) as labels with
-// their group, and the matching node IDs. The first option is none.
+// proxyOptions lists nodes from other groups by stable ID; the first option is none.
 func (a *View) proxyOptions(id string) (labels, ids []string) {
 	labels, ids = []string{noProxy}, []string{""}
 	for _, n := range a.State.Nodes {
@@ -192,7 +187,6 @@ func (a *View) openGroupDialog(id string) {
 	a.gf = f
 }
 
-// missingProxies names the proxies chosen in f whose nodes are gone (or may not be a proxy of the group).
 func (a *View) missingProxies(f *groupForm) []string {
 	_, ids := a.proxyOptions(f.id)
 	var missing []string
@@ -204,7 +198,6 @@ func (a *View) missingProxies(f *groupForm) []string {
 	return missing
 }
 
-// proxyChoice chooses a proxy of the dialog's group by node ID. A chosen node gone is listed as such.
 func (a *View) proxyChoice(c *ui.Context, key, what string, value *string, labels, ids []string) {
 	if !slices.Contains(ids, *value) {
 		ids, labels = append(slices.Clone(ids), *value), append(slices.Clone(labels), what+"节点已不存在")
@@ -287,7 +280,6 @@ func (a *View) groupDialog(c *ui.Context) {
 	}})
 }
 
-// labeled stacks a field under its label.
 func (a *View) labeled(c *ui.Context, label string, field func()) {
 	ui.Column(c).Gap(6).Children(func() {
 		ui.Text(c, label).FontSize(12.5).TextColor(a.pal.muted)

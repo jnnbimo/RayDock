@@ -4,7 +4,7 @@
 <h1 align="center">RayDock</h1>
 <p align="center">基于 Xray-core 的 Windows 代理客户端，使用 Go 与 MyGo 原生自绘 UI 构建。</p>
 <p align="center">
-  <a href="https://github.com/jnnbimo/RayDock/releases"><img src="https://img.shields.io/badge/version-0.1.0-blue" alt="Version 0.1.0"></a>
+  <a href="https://github.com/jnnbimo/RayDock/releases"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="Version 0.1.1"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D4" alt="Windows x64">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>

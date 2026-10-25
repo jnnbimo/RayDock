@@ -9,20 +9,16 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// The context menus of text: the window's own glass menu (ctxMenu) in place of the system's editing
-// menu. MyGo has no call that runs an editing command on an input, so these edit the value an input is
-// bound to, which it shows from the next frame, and give the selection back to it then (pendingSel).
-// Undo stays on Ctrl+Z.
+// Menus edit bound values; MyGo has no public input-edit command API.
+// Restore focus and selection after the next build commits the new text.
 
-// pendingSel is a selection for a text input to take as it builds next: after an edit by its menu, the
-// text it holds is the new value only from then on.
+// pendingSel restores an input selection after the new bound value is committed.
 type pendingSel struct {
 	id   string
 	a, b int
 	set  bool
 }
 
-// restoreSel gives in the keyboard focus and the selection its menu left it.
 func (a *View) restoreSel(in ui.Element, id string) {
 	if s := a.editSel; s.set && s.id == id {
 		a.editSel = pendingSel{}
@@ -36,9 +32,8 @@ func (a *View) selectLater(c *ui.Context, id string, start, end int) {
 	c.AnimationFrame()
 }
 
-// textMenu gives in, an input editing value, its menu: cut, copy, paste, delete and select all. id is
-// unique in the window; multiline is a text area's, where pasted lines stay lines; changed, when not nil,
-// runs after an item changed value, as the input's OnChange would.
+// textMenu preserves newlines only for multiline inputs.
+// id is window-unique; changed also runs for edits made from this menu.
 func (a *View) textMenu(c *ui.Context, in ui.Element, id string, value *string, multiline bool, changed func()) ui.Element {
 	id = "text:" + id
 	a.restoreSel(in, id)
@@ -86,9 +81,7 @@ func (a *View) textMenu(c *ui.Context, in ui.Element, id string, value *string, 
 	return in
 }
 
-// numberMenu gives in, a number input of value from lo to hi, its menu: copy the number, paste one over
-// it, select it. changed, when not nil, runs after a paste changed value, as the input's Changed would
-// report. The input and its buttons are controlHeight high, as the other fields.
+// numberMenu pastes only finite values, clamped to the input range.
 func (a *View) numberMenu(c *ui.Context, in ui.Element, id string, value *float64, lo, hi float64, changed func()) ui.Element {
 	in.AlignItems(ui.Stretch).Height(controlHeight)
 	id = "number:" + id
@@ -119,7 +112,6 @@ func (a *View) numberMenu(c *ui.Context, in ui.Element, id string, value *float6
 	return in
 }
 
-// copyMenu gives e, selectable text showing text, its menu: copy what is selected of it, or all of it.
 func (a *View) copyMenu(c *ui.Context, e ui.Element, id, text string) ui.Element {
 	id = "copy:" + id
 	a.takeRightClick(e, id)

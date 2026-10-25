@@ -5,10 +5,7 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// dialog is one dialog of the window. Every dialog is drawn by View.dialog, so that all look and behave
-// alike: a pane of glass over the window, blurred and dimmed; a header; a body that scrolls when the
-// window is too short for it; the error of the last action, kept in view above the buttons; and the
-// buttons, Cancel before the actions at the end.
+// dialog shares modal layout, scrolling and error handling.
 type dialog struct {
 	width float32
 	title string
@@ -32,7 +29,6 @@ const (
 	focusInset   = 3 // room for focus rings around the fields
 )
 
-// dialog shows d while *open; closing it, by Cancel, Escape or a click beside it, clears its error.
 func (a *View) dialog(c *ui.Context, open *bool, d dialog) {
 	if !*open {
 		if d.err != nil {
@@ -101,9 +97,6 @@ func (a *View) dialog(c *ui.Context, open *bool, d dialog) {
 	})
 }
 
-// errorBar shows err, the error of an action, as dialogs show theirs: a tinted strip with an icon filling
-// the footer up to the buttons, as high as they are, on one line; the whole error shows in its tooltip, and
-// its menu copies it.
 func (a *View) errorBar(c *ui.Context, err string) {
 	p := a.pal
 	bar := ui.Row(c).Gap(8).Padding(0, 12).Height(controlHeight).Radius(10).AlignItems(ui.Center).Grow(1).MinWidth(0).

@@ -4,12 +4,7 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// ctxMenu is the window's one context menu. It is drawn in the window, as glass, rather than by the
-// system, whose menus are opaque and keep a column for check marks on the left and one for shortcuts on
-// the right: this one is of one width (menuWidth), its items starting at the same place.
-//
-// Every element with a context menu takes its right clicks (takeRightClick), so that no system menu
-// opens over the window: node rows, text inputs and selectable text.
+// ctxMenu replaces native menus; every menu-bearing control must consume its right-click.
 type ctxMenu struct {
 	open  bool
 	id    string  // what the menu is for: "node:" and a node's ID, or the key of a text (edit.go)
@@ -39,9 +34,7 @@ type menuItem struct {
 	act      func()
 }
 
-// takeRightClick has e open the menu id where it is right-clicked: a release of the secondary button
-// over it, as Windows opens context menus. The left button goes on to e. While e has the keyboard focus
-// the menu key and Shift+F10 open it too, below e's start.
+// takeRightClick handles secondary-button release and keyboard context-menu shortcuts.
 func (a *View) takeRightClick(e ui.Element, id string) {
 	e.HandleInput(func(ev ui.InputEvent) bool {
 		switch {
@@ -68,7 +61,6 @@ func (a *View) takeRightClick(e ui.Element, id string) {
 	}
 }
 
-// openMenuAt opens the menu id at a window point; from the keyboard, its first item focused.
 func (a *View) openMenuAt(id string, x, y float32, keyboard bool) {
 	a.menu = ctxMenu{open: true, id: id, x: x, y: y, fresh: true}
 	if keyboard {
@@ -76,11 +68,9 @@ func (a *View) openMenuAt(id string, x, y float32, keyboard bool) {
 	}
 }
 
-// menuFor reports whether the open menu is id's.
 func (a *View) menuFor(id string) bool { return a.menu.open && a.menu.id == id }
 
-// drawMenu draws the open menu with items, "" labels being separators; choosing one closes the menu,
-// then runs its action. It is built after what the menu is for, so actions may change it.
+// drawMenu runs actions after the target is built, so they may remove it.
 func (a *View) drawMenu(c *ui.Context, items []menuItem) {
 	m := &a.menu
 	if !m.open {

@@ -6,10 +6,7 @@ import (
 	"raydock/internal/node"
 )
 
-// palette holds the app colors for the current appearance; built-in controls share them through theme.
-//
-// The look is Liquid Glass: panes of glass over a colorful backdrop. Everything on the glass is a tone of
-// white or black at some alpha rather than an opaque color, so that it reads over whatever the glass shows.
+// palette shares translucent colors between native widgets and glass.
 type palette struct {
 	dark                     bool
 	bg                       ui.Color    // the window's own color, under the backdrop, and the scroll edges'
@@ -85,8 +82,7 @@ func (p palette) theme(base ui.Theme) ui.Theme {
 	return t
 }
 
-// on returns col as text or an icon on glass: lightened on dark glass and deepened on light glass, where
-// the backdrop showing through may be as colorful as col itself.
+// on adjusts status colors for text over colored glass.
 func (p palette) on(col ui.Color) ui.Color {
 	if p.dark {
 		return col.Mix(ui.Hex("#ffffff"), 0.35)
@@ -118,7 +114,6 @@ func protocolColor(protocol string) ui.Color {
 	return ui.Hex("#64748b")
 }
 
-// latencyColor: green under 200 ms, yellow under 500 ms, red otherwise.
 func (p palette) latencyColor(ms int64) ui.Color {
 	switch {
 	case ms < 200:
