@@ -148,5 +148,6 @@ var (
 	icArrowDown  = icon(`<path d="M12 5v14M19 12l-7 7-7-7"/>`)
 	icFolderPlus = icon(`<path d="M12 10v6M9 13h6"/><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>`)
 	icPencil     = icon(`<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>`)
+	icQR         = icon(`<rect x="3" y="3" width="5" height="5" rx="1"/><rect x="16" y="3" width="5" height="5" rx="1"/><rect x="3" y="16" width="5" height="5" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3M21 21v.01M12 7v3a2 2 0 0 1-2 2H7M3 12h.01M12 3h.01M12 16v.01M16 12h1M21 12v.01M12 21v-1"/>`)
 	icAlert      = icon(`<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>`)
 )

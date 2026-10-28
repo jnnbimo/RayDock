@@ -12,7 +12,7 @@ import (
 func (a *View) logsPage(c *ui.Context) {
 	p := a.pal
 	ui.Column(c).Grow(1).MinHeight(0).Padding(4, padPage, padPage).Gap(gapBlock).Children(func() {
-		a.pageHeader(c, "日志", fmt.Sprintf("Xray 核心与 RayDock 的输出，保留最近 %d 行", app.MaxLogs), func() {
+		a.pageHeader(c, "日志", fmt.Sprintf("保留最近 %d 行", app.MaxLogs), func() {
 			if iconButton(c, icCopy, "复制").Disabled(len(a.Logs) == 0).Clicked() {
 				a.copyLogs(c)
 			}

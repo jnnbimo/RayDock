@@ -50,7 +50,7 @@ func TestPagesAlign(t *testing.T) {
 	content := row.X // where the content of every pane starts
 
 	show("/logs")
-	logSub := find("Xray 核心与 RayDock 的输出，保留最近 2000 行")
+	logSub := find("保留最近 2000 行")
 	near("the logs' line about them", logSub.X, sub.X)
 	near("the logs' line about them", logSub.Y, sub.Y)
 	near("a log line", find("[RayDock] 日志第一行").X, content)

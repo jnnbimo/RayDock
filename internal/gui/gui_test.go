@@ -420,6 +420,103 @@ func TestPortDialog(t *testing.T) {
 	}
 }
 
+// A node's menu lists its actions in a fixed order, deleting set apart at the end.
+func TestNodeMenuOrder(t *testing.T) {
+	h := apptest.New(t)
+	h.A.ImportLinks(apptest.LinkA, "")
+	tt := ui.NewTester(New(h.A).Build, 1180, 760)
+	openRowMenu(t, tt, "a.example.com:443")
+	want := []string{"连接", "编辑", "测速", "测延迟", "节点分享", "设置专用端口", "删除"}
+	// The menu is built last; each item shows its text once and is labeled with it once.
+	texts := tt.Texts()
+	var got []string
+	for _, s := range texts[slices.Index(texts, "连接"):] {
+		if slices.Contains(want, s) && (len(got) == 0 || got[len(got)-1] != s) {
+			got = append(got, s)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("menu %q, want %q", got, want)
+	}
+}
+
+// Sharing shows the node's link as a QR code, module for module, above the link itself, and follows a
+// changed link. A link beyond a QR code's capacity is still shown and copied, without a cut-short code.
+func TestShareNode(t *testing.T) {
+	h := apptest.New(t)
+	a := h.A
+	a.ImportLinks(apptest.LinkA, "")
+	link := a.State.Nodes[0].Link
+	v := New(a)
+	tt := ui.NewTester(v.Build, 1180, 760)
+	openRowMenu(t, tt, "a.example.com:443")
+	if tt.HasText("复制分享链接") || tt.HasText("二维码分享") {
+		t.Fatalf("one item shares: %q", tt.Texts())
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+	chooseFromMenu(t, tt, "a.example.com:443", "节点分享")
+	for range 30 {
+		tt.Frame()
+	}
+	if !v.share.open || v.share.link != link || !tt.HasText("节点分享") || !tt.HasText("节点A") || !tt.HasText(link) {
+		t.Fatalf("share %+v texts %q", v.share, tt.Texts())
+	}
+	qr, ok := tt.Find("节点二维码")
+	text, ok2 := tt.Find(link)
+	code := v.share.code
+	if !ok || !ok2 || code == nil || text.Y < qr.Y+qr.H {
+		t.Fatalf("QR %+v %v, link %+v %v", qr, ok, text, ok2)
+	}
+	m := qr.W / float32(code.Size+2*qrQuiet)
+	if m < 2 || m != float32(int(m)) || qr.W != qr.H {
+		t.Fatalf("tile %+v for %d modules", qr, code.Size)
+	}
+	img := tt.Image()
+	dark := func(x, y int) bool {
+		px := img.RGBAAt(int(qr.X+(float32(x)+0.5)*m), int(qr.Y+(float32(y)+0.5)*m))
+		return int(px.R)+int(px.G)+int(px.B) < 3*128
+	}
+	for y := -qrQuiet; y < code.Size+qrQuiet; y++ {
+		for x := -qrQuiet; x < code.Size+qrQuiet; x++ {
+			inside := x >= 0 && y >= 0 && x < code.Size && y < code.Size
+			if want := inside && code.Black(x, y); dark(qrQuiet+x, qrQuiet+y) != want {
+				t.Fatalf("module %d,%d: dark %v, want %v", x, y, !want, want)
+			}
+		}
+	}
+	if err := tt.Click("复制链接"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if h.Clip.Text != link {
+		t.Fatalf("clipboard %q", h.Clip.Text)
+	}
+	// A subscription update replaces the link while the dialog is open.
+	a.State.Nodes[0].Link = apptest.LinkB
+	tt.Frame()
+	if v.share.link != apptest.LinkB || v.share.code == code || !tt.HasText(apptest.LinkB) {
+		t.Fatalf("stale share of %q", v.share.link)
+	}
+	long := "vless://x@a.example.com:443#" + strings.Repeat("%E8%8A%82", 400)
+	a.State.Nodes[0].Link = long
+	tt.Frame()
+	tt.Frame()
+	if !v.share.open || v.share.code != nil || !tt.HasText("链接过长，无法生成二维码") || !tt.HasText(long) {
+		t.Fatalf("share %+v texts %q", v.share.open, tt.Texts())
+	}
+	if _, ok := tt.Find("节点二维码"); ok {
+		t.Fatal("no QR code for a link beyond its capacity")
+	}
+	if err := tt.Click("复制链接"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if h.Clip.Text != long {
+		t.Fatal("the long link is copied whole")
+	}
+}
+
 // Speed tests start from a node's menu; while one runs, the menu stops it.
 func TestSpeedFromMenu(t *testing.T) {
 	h := apptest.New(t)
@@ -486,7 +583,7 @@ func openRowMenu(t *testing.T, tt *ui.Tester, text string) {
 	}
 	tt.Frame()
 	tt.Frame()
-	if !tt.HasText("复制分享链接") {
+	if !tt.HasText("设置专用端口") {
 		t.Fatalf("no menu: %q", tt.Texts())
 	}
 }
@@ -499,7 +596,7 @@ func chooseFromMenu(t *testing.T, tt *ui.Tester, text, item string) {
 		t.Fatal(err)
 	}
 	tt.Frame()
-	if tt.HasText("复制分享链接") {
+	if tt.HasText("设置专用端口") {
 		t.Fatalf("menu still open after %s", item)
 	}
 }

@@ -4,7 +4,7 @@
 <h1 align="center">RayDock</h1>
 <p align="center">基于 Xray-core 的 Windows 代理客户端，使用 Go 与 MyGo 原生自绘 UI 构建。</p>
 <p align="center">
-  <a href="https://github.com/jnnbimo/RayDock/releases"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="Version 0.1.1"></a>
+  <a href="https://github.com/jnnbimo/RayDock/releases"><img src="https://img.shields.io/badge/version-0.1.2-blue" alt="Version 0.1.2"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D4" alt="Windows x64">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
@@ -22,7 +22,7 @@
 
 - **原生玻璃界面**：浅色、深色及跟随系统；无 GPU 时也保留玻璃效果。
 - **多协议支持**：VLESS、VMess、Trojan、Shadowsocks、Hysteria2、SOCKS5、HTTP / HTTPS、WireGuard；高级出站可通过 Xray JSON 导入。
-- **节点与订阅**：支持分享链接、Base64 订阅、Clash / Mihomo YAML，提供分组管理、拖动排序和节点编辑。
+- **节点与订阅**：支持分享链接、Base64 订阅、Clash / Mihomo YAML，提供分组管理、拖动排序、节点编辑和二维码分享。
 - **系统代理与 TUN**：支持绕过大陆、全局、直连，以及自定义域名、IP、进程规则和 DNS。
 - **代理链与专用端口**：按分组设置前置 / 后置代理，为不同节点分配独立的本地端口。
 - **连接测试与桌面集成**：测延迟、查出口 IP、上传 / 下载测速，支持托盘控制和开机自启。
@@ -48,7 +48,7 @@
 3. 按需开启「系统代理」或「TUN 模式」；**TUN 需要管理员权限**。
 4. 在侧栏切换路由模式。连接中的待应用设置需点击顶部「应用」。
 
-默认本地代理为 **`127.0.0.1:10818`**，HTTP 与 SOCKS5 共用该端口。节点右键菜单提供测延迟、测速、编辑及专用端口设置；分组编辑中可配置代理链。
+默认本地代理为 **`127.0.0.1:10818`**，HTTP 与 SOCKS5 共用该端口。节点右键菜单提供编辑、测速、测延迟、节点分享（二维码与链接）及专用端口设置；分组编辑中可配置代理链。
 
 关闭窗口后仍在托盘运行。完全退出请使用托盘菜单中的「退出 RayDock」。
 

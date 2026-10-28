@@ -223,17 +223,14 @@ func (a *View) nodeMenu(c *ui.Context) {
 	a.drawMenu(c, []menuItem{
 		{label: "连接", act: func() { a.connect(c, id) }},
 		{label: "编辑", act: func() { a.openEditNode(id) }},
+		speed,
 		{label: "测延迟", disabled: a.LatencyBusy, act: func() {
 			if err := a.TestLatency([]string{id}); err != nil {
 				c.Toast(err.Error())
 			}
 		}},
-		speed,
+		{label: "节点分享", disabled: link == "", act: func() { a.openShare(id) }},
 		{label: "设置专用端口", act: func() { a.openPortDialog(id) }},
-		{label: "复制分享链接", disabled: link == "", act: func() {
-			a.Clipboard.WriteText(link)
-			c.Toast("已复制分享链接")
-		}},
 		{},
 		{label: "删除", danger: true, act: func() { a.confirmDeleteNode(id) }},
 	})

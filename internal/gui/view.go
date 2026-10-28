@@ -64,6 +64,7 @@ type View struct {
 	portErr     string // the error of the last save in the port dialog
 	adminErr    string // the error of the last elevated restart
 	gf          groupForm
+	share       nodeShare
 	logLS       ui.ListState
 	cf          confirmation // deletion being asked about
 	ruleTab     int
@@ -121,6 +122,7 @@ func (a *View) Build(c *ui.Context) {
 	a.nodeDialog(c)
 	a.groupDialog(c)
 	a.portDialog(c)
+	a.shareDialog(c)
 	a.adminDialog(c)
 	a.confirmDialog(c)
 	a.toasts(c)
