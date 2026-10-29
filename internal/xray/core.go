@@ -198,30 +198,6 @@ func Version(exe string) (string, error) {
 	return fields[1], nil
 }
 
-// Test checks with "xray run -test" whether the core accepts config.
-func Test(exe string, config []byte) error {
-	f, err := os.CreateTemp("", "raydock-test-*.json")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(config); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "run", "-test", "-config", f.Name())
-	cmd.Env = assetEnv(exe)
-	hideWindow(cmd)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, lastLines(strings.TrimSpace(string(out)), 6))
-	}
-	return nil
-}
-
 // assetEnv is the environment of a core run from exe, which finds its rule data next to it.
 func assetEnv(exe string) []string {
 	return append(os.Environ(), "XRAY_LOCATION_ASSET="+filepath.Dir(exe))

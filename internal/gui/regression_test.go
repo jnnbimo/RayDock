@@ -23,7 +23,7 @@ func TestMissingProxyRequiresExplicitChoice(t *testing.T) {
 	a.ImportLinks(apptest.LinkA, "")
 	home := a.State.Groups[0].ID
 	a.GroupByID(home).Front = "missing"
-	v := New(a)
+	v := nodesView(a)
 	v.openGroupDialog(home)
 	v.gf.name = "renamed"
 	tt := ui.NewTester(v.Build, 1180, 760)
@@ -57,7 +57,7 @@ func TestImportDuplicateGroupNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := New(a)
+	v := nodesView(a)
 	v.group = second
 	v.openAddNode()
 	v.nf.links = apptest.LinkA
@@ -76,7 +76,7 @@ func TestFormChoiceKeyboard(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
 	t.Cleanup(a.Shutdown)
-	v := New(a)
+	v := nodesView(a)
 	v.openAddNode()
 	v.nf.mode = 1
 	tt := ui.NewTester(v.Build, 1180, 760)
@@ -102,7 +102,7 @@ func TestPowerKeyboardActivation(t *testing.T) {
 			a.ImportLinks(apptest.LinkA, "")
 			a.State.SelectedID = a.State.Nodes[0].ID
 			h.Core.Err = errors.New("test offline")
-			tt := ui.NewTester(New(a).Build, 1180, 760)
+			tt := ui.NewTester(nodesView(a).Build, 1180, 760)
 			reached := false
 			for range 20 {
 				tt.Key(0, ui.KeyTab)
@@ -165,7 +165,7 @@ func TestGroupProxyKeptByNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.UpdateSubscription(sub)
-	v := New(a)
+	v := nodesView(a)
 	v.openGroupDialog(home)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	close(gate)
@@ -184,7 +184,7 @@ func TestGroupProxyKeptByNode(t *testing.T) {
 func TestFailedImportKeepsInput(t *testing.T) {
 	h := apptest.New(t)
 	t.Cleanup(h.A.Shutdown)
-	v := New(h.A)
+	v := nodesView(h.A)
 	v.openAddNode()
 	v.nf.links = "this is not a proxy node"
 	tt := ui.NewTester(v.Build, 1180, 760)
@@ -206,7 +206,7 @@ func TestSaveAppliesConnectionChanges(t *testing.T) {
 			a.ImportLinks("socks://127.0.0.1:9#current", "")
 			id, home := a.State.Nodes[0].ID, a.State.Groups[0].ID
 			a.Conn, a.ActiveID = app.StateOn, id
-			v := New(a)
+			v := nodesView(a)
 			if group {
 				relay, err := a.AddGroup(app.GroupInput{Name: "relay"})
 				if err != nil {

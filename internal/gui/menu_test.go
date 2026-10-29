@@ -42,7 +42,7 @@ func TestTextMenus(t *testing.T) {
 	a.QueueLog("2026/10/18 [Warning] core: Xray started")
 	a.QueueLog("2026/10/18 [Info] proxy: accepted")
 	a.FlushLogs()
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	clickFrame(t, tt, "日志")
 
@@ -89,7 +89,7 @@ func TestNoSystemMenus(t *testing.T) {
 	a := h.A
 	a.ImportLinks(apptest.LinkA, "")
 	a.ConnErr = "连接失败：测试"
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	// below right-clicks under the label text, on the field it labels (labeled).
 	below := func(text string) {
@@ -162,7 +162,7 @@ func TestNoSystemMenus(t *testing.T) {
 func TestNumberMenu(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	clickFrame(t, tt, "设置")
 	h.Clip.Text = " 23456 "

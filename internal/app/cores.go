@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -47,20 +48,34 @@ var (
 type coreSet struct {
 	mu    sync.Mutex
 	cores []*xray.Core
+	apis  map[*xray.Core]int // their API ports, which serve their traffic counts (xray.ReadTraffic)
+	// Sampling and retirement share mu: no poll can recount a retired core.
+	counts  map[*xray.Core]xray.Traffic
+	samples []trafficSample
+	client  *http.Client
+	readAt  time.Time
+	moving  bool
 }
 
-func (s *coreSet) add(c *xray.Core) {
+func (s *coreSet) add(c *xray.Core, api int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !slices.Contains(s.cores, c) {
 		s.cores = append(s.cores, c)
 	}
+	if s.apis == nil {
+		s.apis = map[*xray.Core]int{}
+	}
+	s.apis[c] = api
 }
 
 func (s *coreSet) remove(c *xray.Core) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordTraffic(s.readTraffic(context.Background(), c), false)
 	s.cores = slices.DeleteFunc(s.cores, func(x *xray.Core) bool { return x == c })
+	delete(s.apis, c)
+	delete(s.counts, c)
 }
 
 // take removes and returns the cores but those in keep.
@@ -75,17 +90,27 @@ func (s *coreSet) take(keep ...*xray.Core) []*xray.Core {
 		out = append(out, c)
 		return true
 	})
+	// One slow API must not add a timeout for every core on exit.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var moved xray.Traffic
+	for _, c := range out {
+		moved = moved.Add(s.readTraffic(ctx, c))
+		delete(s.apis, c)
+		delete(s.counts, c)
+	}
+	s.recordTraffic(moved, false)
 	return out
 }
 
 func (a *App) newCore() *xray.Core { return &xray.Core{OnLog: a.QueueLog} }
 
-// startBackend reports exits only for the current planned pair. Core queue only.
+// startBackend reports exits of the actual committed backend, not the newest plan. Core queue only.
 func (a *App) startBackend(r *runningCore, seq int) error {
-	a.procs.add(r.core)
+	a.procs.add(r.core, r.opts.APIPort)
 	err := r.core.StartWithExit(a.coreExe(), filepath.Join(a.DataDir, "config.json"), r.cfg, func(err error) {
 		a.Post(func() {
-			if a.run != nil && a.run.core == r.core {
+			if live := a.live.Load(); live != nil && live.run.core == r.core {
 				a.pairExited(seq, err)
 			}
 		})
@@ -178,14 +203,20 @@ type coreTarget struct {
 	served  string // the dedicated ports, for the log
 	// drain lets the backend core replaced on the way finish its connections: unless the user picked
 	// another node or disconnected, which ends them.
-	drain  bool
-	ctx    context.Context // the cores': ends API calls with them
-	drains context.Context // ends the cores finishing their connections with the cores
+	drain bool
+	// switched moves the connection to another node: it is connected since then (App.Since). reroute
+	// changes where its requests go: the node, its chain, the settings, the network or the core files,
+	// which the home page's check was made through (App.routeGen); a dedicated port alone does not.
+	switched, reroute bool
+	ctx               context.Context // the cores': ends API calls with them
+	drains            context.Context // ends the cores finishing their connections with the cores
 }
 
 func mergeTarget(old, t *coreTarget) {
 	if old.seq == t.seq {
 		t.drain = t.drain && old.drain
+		// t replaces old, which never ran: t makes its changes too.
+		t.switched, t.reroute = t.switched || old.switched, t.reroute || old.reroute
 	}
 }
 
@@ -225,7 +256,11 @@ func (a *App) startPair(t *coreTarget, done func(error)) {
 			for _, c := range a.procs.take(t.run.core) {
 				c.Stop() // the cores before
 			}
-			a.live = t
+			a.live.Store(t)
+			if !t.run.core.Running() || !a.front.Running() {
+				err = fmt.Errorf("核心在提交连接前已退出")
+				a.stopCores()
+			}
 		}
 		if prevTUN && a.FlushDNS != nil {
 			a.FlushDNS()
@@ -388,8 +423,9 @@ func (a *App) apply(n *node.Node, chain []*node.Node, opts xray.Options, toast f
 		}
 	}
 	a.changed()
+	reroute := n != nil && (switched || ch.renew || opts != r.opts || !sameJSON(r.b.Chain, b.Chain) || !sameJSON(r.b.Local, b.Local))
 	t := &coreTarget{seq: a.pairSeq, connSeq: a.connSeq, id: id, run: backend, front: front, served: a.describePorts(b.Ports),
-		drain: !cut, ctx: a.pairCtx, drains: a.drainCtx}
+		drain: !cut, switched: switched, reroute: reroute, ctx: a.pairCtx, drains: a.drainCtx}
 	a.planned = t
 	a.coreWant.set(t, mergeTarget, func(op func()) <-chan struct{} { return queueOperation(a.coreOps, op) }, a.reconcile)
 	return true
@@ -408,7 +444,7 @@ func (a *App) logConnect(n *node.Node, chain []*node.Node, opts xray.Options) {
 // reconcile reaches a target from live state. Startup failure preserves the old pair;
 // API failure makes the state uncertain and requires a restart. Core queue only.
 func (a *App) reconcile(t *coreTarget) {
-	live := a.live
+	live := a.live.Load()
 	if live == nil || live.seq != t.seq {
 		return // the cores stopped or started again since
 	}
@@ -456,8 +492,10 @@ func (a *App) reconcile(t *coreTarget) {
 				a.procs.remove(t.run.core)
 				t.run.core.Stop()
 			}
-		} else {
-			a.live = nil // what runs is unknown: changes planned meanwhile wait for the restart
+		}
+		clean = clean && live.run.core.Running() && a.front.Running()
+		if !clean {
+			a.live.Store(nil) // partial changes or a dead original pair cannot be rolled back
 		}
 		a.Post(func() { a.applyFailed(t, live, err, clean) })
 		return
@@ -471,12 +509,16 @@ func (a *App) reconcile(t *coreTarget) {
 	} else if replaced {
 		a.drainCore(t.drains, live.run.core, live.run.b.Mixed, live.run.b.TUN)
 	}
-	a.live = t
+	a.live.Store(t)
+	if !t.run.core.Running() || !a.front.Running() {
+		a.Post(func() { a.pairExited(t.seq, fmt.Errorf("核心在提交变更时已退出")) })
+		return
+	}
 	a.Post(func() { a.applied(t) })
 }
 
 func (a *App) applied(t *coreTarget) {
-	if t.seq != a.pairSeq {
+	if t.seq != a.pairSeq || a.live.Load() != t {
 		return
 	}
 	a.notePorts(t)
@@ -489,7 +531,12 @@ func (a *App) applied(t *coreTarget) {
 			a.SyncProxy()
 		case StateOn:
 			if a.ActiveID == t.id {
-				a.Since = time.Now()
+				if t.switched {
+					a.Since = time.Now()
+				}
+				if t.reroute {
+					a.routeGen++
+				}
 			}
 			if port := t.run.opts.Port; a.runningPort != port {
 				a.runningPort = port // the new local port opened: the system proxy moves there
@@ -506,7 +553,7 @@ func (a *App) applyFailed(t, live *coreTarget, err error, clean bool) {
 	if t.seq != a.pairSeq {
 		return
 	}
-	if !clean {
+	if !clean || !live.run.core.Running() || !a.front.Running() {
 		a.QueueLog("[RayDock] 无法在运行中应用，重新启动核心：" + err.Error())
 		a.restartPair()
 		return
@@ -586,7 +633,7 @@ func (a *App) resetDrains() {
 
 // stopCores closes the front listener before retiring every backend. Core queue only.
 func (a *App) stopCores() {
-	a.live = nil
+	a.live.Store(nil)
 	a.front.Stop()
 	for _, c := range a.procs.take() {
 		c.Stop()

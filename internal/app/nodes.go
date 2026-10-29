@@ -172,17 +172,24 @@ func (a *App) DeleteNode(id string) {
 	a.SyncCores()
 }
 
-// TestReal requests a page through the local proxy to check the whole path.
+// TestReal requests a page through the local proxy to check the whole path. A result measured through
+// cores that no longer serve the connection is dropped, and the test ends without one.
 func (a *App) TestReal() {
-	if a.Conn != StateOn {
+	target := a.connectionTarget()
+	if target == nil {
 		return
 	}
+	a.realTests++
 	a.RealTest = Latency{Testing: true}
-	seq, run, id, port := a.connSeq, a.run, a.ActiveID, a.ProxyPort()
+	test, port, ctx := a.realTests, target.run.opts.Port, a.connCtx
 	go func() {
-		d, err := probe.ViaProxy(a.workCtx, port, probe.TestURL, 10*time.Second)
+		d, err := probe.ViaProxy(ctx, port, probe.TestURL, 10*time.Second)
 		a.Post(func() {
-			if a.Conn != StateOn || seq != a.connSeq || run != a.run || id != a.ActiveID {
+			if test != a.realTests {
+				return // a later test owns the result shown
+			}
+			if a.connectionTarget() != target {
+				a.RealTest = Latency{}
 				return
 			}
 			a.RealTest = Latency{Duration: d}

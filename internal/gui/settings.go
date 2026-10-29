@@ -67,7 +67,7 @@ func (a *View) coreSection(c *ui.Context) {
 					label = "下载核心"
 				}
 				if iconButton(c, icDownload, label).Disabled(a.CoreBusy || a.GeoBusy).Clicked() {
-					a.InstallCore()
+					a.UpdateCore()
 				}
 			default:
 				if iconButton(c, icRefresh, "检查更新").Disabled(a.CoreBusy || a.CoreChecking).Tooltip("查询最新正式版，不会自动安装").Clicked() {

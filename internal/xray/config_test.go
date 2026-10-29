@@ -330,14 +330,14 @@ func TestRoutingModes(t *testing.T) {
 			t.Errorf("%s mode: geoip:cn goes to %q", mode, cn)
 		}
 		// DNS module queries: domestic DNS direct, remote DNS proxied (direct in direct mode).
-		if _, tag := findRule(rules, "ip", "223.5.5.5"); tag != tagDirect {
+		if _, tag := findRule(rules, "inboundTag", tagDNS); tag != tagDirectDNS {
 			t.Errorf("%s mode: domestic DNS goes to %q", mode, tag)
 		}
 		remote := tagProxy
 		if mode == ModeDirect {
-			remote = tagDirect
+			remote = tagDirectDNS
 		}
-		if _, tag := findRule(rules, "ip", "8.8.8.8"); tag != remote {
+		if _, tag := findRule(rules, "inboundTag", tagRemoteDNS); tag != remote {
 			t.Errorf("%s mode: remote DNS goes to %q", mode, tag)
 		}
 	}
@@ -437,6 +437,8 @@ func TestDNS(t *testing.T) {
 		"dns.tag":                 tagDNS,
 		"dns.queryStrategy":       "UseIPv4",
 		"dns.servers.0.address":   "https://dns.alidns.com/dns-query",
+		"dns.servers.0.tag":       tagDNS,
+		"dns.servers.1.tag":       tagRemoteDNS,
 		"dns.servers.0.domains.0": "geosite:cn",
 		"dns.servers.1.address":   "1.1.1.1",
 		"dns.servers.1.port":      float64(5353),
@@ -450,9 +452,9 @@ func TestDNS(t *testing.T) {
 	if !contains(hosts["router.lan"], "192.168.1.1") || !contains(hosts["dns.alidns.com"], "223.5.5.5") {
 		t.Errorf("hosts %v", hosts)
 	}
-	// DoH servers go direct by domain and known addresses.
+	// DoH follows the resolver role, even if its host/IP is shared with remote DNS.
 	rules := rulesOf(t, o)
-	if _, tag := findRule(rules, "domain", "full:dns.alidns.com"); tag != tagDirect {
+	if _, tag := findRule(rules, "inboundTag", tagDNS); tag != tagDirectDNS {
 		t.Errorf("DoH domain goes to %q", tag)
 	}
 	for _, bad := range []string{"udp://1.1.1.1", "dns.google", "1.1.1.1:0", "https://"} {

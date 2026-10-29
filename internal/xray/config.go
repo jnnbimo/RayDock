@@ -25,13 +25,15 @@ const (
 
 // Tags let routing rules refer to inbounds, outbounds and the DNS module.
 const (
-	tagProxy  = "proxy"
-	tagDirect = "direct"
-	tagBlock  = "block"
-	tagDNSOut = "dns-out"
-	tagMixed  = "mixed-in"
-	tagTUN    = "tun-in"
-	tagDNS    = "dns-internal" // queries sent by the DNS module itself
+	tagProxy     = "proxy"
+	tagDirect    = "direct"
+	tagBlock     = "block"
+	tagDNSOut    = "dns-out"
+	tagDirectDNS = "direct-dns" // the DNS module's own queries that leave directly (see directFinalRules)
+	tagMixed     = "mixed-in"
+	tagTUN       = "tun-in"
+	tagDNS       = "dns-internal" // direct and node-address DNS queries
+	tagRemoteDNS = "dns-remote"   // remote DNS queries keep their role even on a shared endpoint
 )
 
 // TUN addresses. The system DNS points at a second address in the gateway subnet; queries entering
@@ -159,11 +161,11 @@ func BuildBackend(o Options, b Backend) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	nodeServers, nodeRules, viaDirect := nodeDNS(b, remote)
+	nodeServers, viaDirect := nodeDNS(b)
 	directDomains := append([]string{"geosite:cn", "geosite:private"}, rules.direct.Domains...)
-	routes, _ := routing(o, rules, direct, remote, tagProxy)
+	routes, _ := routing(o, rules, tagProxy)
 	// The dedicated ports come first: whatever their connections are, their chain takes them.
-	routes["rules"] = slices.Concat(portRules, nodeRules, routes["rules"].([]any))
+	routes["rules"] = slices.Concat(portRules, routes["rules"].([]any))
 
 	cfg := obj{
 		"log":       obj{"loglevel": logLevel(o.LogLevel)},
@@ -172,9 +174,7 @@ func BuildBackend(o Options, b Backend) ([]byte, error) {
 		"routing":   routes,
 		"dns":       dnsConfig(o, strategy, direct, remote, append(directDomains, viaDirect...), hosts, nodeServers),
 	}
-	if o.APIPort > 0 {
-		cfg["api"] = apiConfig(o.APIPort)
-	}
+	backendAPI(cfg, o.APIPort)
 	if o.TUN.Enabled && o.FakeDNS {
 		pools := []any{obj{"ipPool": fakePool4, "poolSize": 65535}}
 		if strategy != "UseIPv4" {
@@ -202,9 +202,7 @@ func buildPortsBackend(o Options, b Backend) ([]byte, error) {
 		"outbounds": append([]any{obj{"tag": tagBlock, "protocol": "blackhole", "settings": obj{}}}, outs...),
 		"routing":   obj{"rules": rules},
 	}
-	if o.APIPort > 0 {
-		cfg["api"] = apiConfig(o.APIPort)
-	}
+	backendAPI(cfg, o.APIPort)
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
@@ -223,10 +221,10 @@ func portRelays(b Backend) (outs, rules []any, err error) {
 }
 
 // nodeDNS resolves first-hop addresses directly through the physical network's DNS.
-// Exclude the proxied remote DNS to avoid a bootstrap cycle; if none remain, use domestic DNS.
-func nodeDNS(b Backend, remote dnsServer) (servers, rules []any, viaDirect []string) {
+// Resolver tags distinguish these queries from proxied queries, even to the same IP.
+func nodeDNS(b Backend) (servers []any, viaDirect []string) {
 	if b.Local == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	var domains []string
 	for _, chain := range append([][]*node.Node{b.Chain}, portChains(b.Ports)...) {
@@ -237,20 +235,15 @@ func nodeDNS(b Backend, remote dnsServer) (servers, rules []any, viaDirect []str
 	slices.Sort(domains)
 	domains = slices.Compact(domains)
 	if len(domains) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
-	var ips []string
 	for _, ip := range b.Local.DNS {
-		if ip == remote.ip {
-			continue
-		}
-		ips = append(ips, ip)
-		servers = append(servers, obj{"address": ip, "domains": domains, "skipFallback": true, "queryStrategy": b.Local.strategy()})
+		servers = append(servers, obj{"address": ip, "tag": tagDNS, "domains": domains, "skipFallback": true, "queryStrategy": b.Local.strategy()})
 	}
-	if len(ips) == 0 {
-		return nil, nil, domains
+	if len(servers) == 0 {
+		return nil, domains // no physical resolver: the domestic resolver bootstraps the nodes
 	}
-	return servers, []any{obj{"type": "field", "inboundTag": []string{tagDNS}, "ip": ips, "outboundTag": tagDirect}}, nil
+	return servers, nil
 }
 
 func portChains(routes []PortRoute) [][]*node.Node {
@@ -269,9 +262,19 @@ func dnsStrategy(o Options) string {
 	return "UseIPv4"
 }
 
-func apiConfig(port int) obj {
+func apiConfig(port int, services ...string) obj {
 	return obj{"tag": "api", "listen": net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
-		"services": []string{"HandlerService", "RoutingService"}}
+		"services": append([]string{"HandlerService", "RoutingService"}, services...)}
+}
+
+// backendAPI opens a backend core's API on port, if any: it switches the routing (API.Switch) and serves
+// the traffic counts (ReadTraffic). Without an API nothing is counted.
+func backendAPI(cfg obj, port int) {
+	if port <= 0 {
+		return
+	}
+	cfg["api"] = apiConfig(port, "StatsService")
+	statsConfig(cfg)
 }
 
 // Local binds core and measurement traffic to a physical interface and its DNS.
@@ -533,13 +536,28 @@ func outbounds(proxies []any, o Options, strategy string, local *Local) []any {
 	}
 	list := append(proxies,
 		// Direct traffic uses Xray's DNS: China domains via the domestic DNS, the rest via the remote DNS.
-		obj{"tag": tagDirect, "protocol": "freedom", "streamSettings": obj{"sockopt": sockopt}},
+		obj{"tag": tagDirect, "protocol": "freedom", "settings": obj{"finalRules": directFinalRules(o)}, "streamSettings": obj{"sockopt": sockopt}},
 		obj{"tag": tagBlock, "protocol": "blackhole", "settings": obj{}},
 	)
 	if o.TUN.Enabled {
 		list = append(list, obj{"tag": tagDNSOut, "protocol": "dns"})
 	}
-	return list
+	// The DNS module's direct queries: resolvers on this computer stay reachable with the local port open
+	// to the LAN.
+	return append(list, obj{"tag": tagDirectDNS, "protocol": "freedom", "streamSettings": obj{"sockopt": sockopt}})
+}
+
+// directFinalRules lets direct traffic reach private addresses, which the routing sends direct (geoip:private):
+// Xray's freedom refuses them by default behind a VLESS inbound, as the backend core's relay inbounds are,
+// and would hold the connection for a minute. With the local port open to the LAN, loopback stays refused,
+// so that other devices cannot reach the services of this computer through it. The rules match addresses
+// alone, whoever asks: the DNS module's queries leave by tagDirectDNS instead.
+func directFinalRules(o Options) []any {
+	allow := obj{"action": "allow"}
+	if o.AllowLAN {
+		return []any{obj{"action": "block", "ip": []string{"127.0.0.0/8", "::1/128"}}, allow}
+	}
+	return []any{allow}
 }
 
 type parsedRules struct{ proxy, direct, block RuleSet }
@@ -562,7 +580,7 @@ func parseAllRules(o Options) (parsedRules, error) {
 
 // Process rules run in the front core. Relay users preserve their match order here;
 // procs carries the corresponding front-core rules.
-func routing(o Options, r parsedRules, direct, remote dnsServer, proxy string) (routes obj, procs []procRule) {
+func routing(o Options, r parsedRules, proxy string) (routes obj, procs []procRule) {
 	var rules []any
 	add := func(tag string, kv ...any) {
 		rule := obj{"type": "field", "outboundTag": tag}
@@ -601,21 +619,10 @@ func routing(o Options, r parsedRules, direct, remote dnsServer, proxy string) (
 	// Queries of the DNS module: domestic DNS direct, remote DNS proxied (direct in direct mode).
 	remoteTag := proxy
 	if o.Mode == ModeDirect {
-		remoteTag = tagDirect
+		remoteTag = tagDirectDNS
 	}
-	for _, s := range []struct {
-		srv dnsServer
-		tag string
-	}{{direct, tagDirect}, {remote, remoteTag}} {
-		if s.srv.ip != "" {
-			add(s.tag, "inboundTag", []string{tagDNS}, "ip", []string{s.srv.ip})
-		} else if s.srv.host != "" {
-			add(s.tag, "inboundTag", []string{tagDNS}, "domain", []string{"full:" + s.srv.host})
-			if ips := dohHosts[s.srv.host]; len(ips) > 0 {
-				add(s.tag, "inboundTag", []string{tagDNS}, "ip", ips)
-			}
-		}
-	}
+	add(tagDirectDNS, "inboundTag", []string{tagDNS})
+	add(remoteTag, "inboundTag", []string{tagRemoteDNS})
 
 	addSet(tagBlock, r.block)
 	if o.BlockAds {
@@ -666,9 +673,10 @@ func dnsConfig(o Options, strategy string, direct, remote dnsServer, directDomai
 	}
 	servers = append(servers, nodes...)
 	d := direct.entry()
-	d["domains"] = directDomains
-	d["skipFallback"] = true
-	servers = append(servers, d, remote.entry())
+	d["domains"], d["skipFallback"], d["tag"] = directDomains, true, tagDNS
+	r := remote.entry()
+	r["tag"] = tagRemoteDNS
+	servers = append(servers, d, r)
 	return obj{
 		"tag":           tagDNS,
 		"hosts":         hosts,
@@ -677,12 +685,10 @@ func dnsConfig(o Options, strategy string, direct, remote dnsServer, directDomai
 	}
 }
 
-// dnsServer is a DNS server address and the host part used by routing rules.
+// dnsServer is a validated DNS endpoint; routing uses its role, not its address.
 type dnsServer struct {
 	address string // address given to Xray
 	port    int
-	host    string // host name for routing rules
-	ip      string // set when the host is an IP
 }
 
 func (s dnsServer) entry() obj {
@@ -716,14 +722,10 @@ func parseDNS(s, def string) (dnsServer, error) {
 		if err != nil || u.Hostname() == "" {
 			return dnsServer{}, errors.New("地址格式错误")
 		}
-		srv := dnsServer{address: s, host: strings.ToLower(u.Hostname())}
-		if isIP(srv.host) {
-			srv.ip, srv.host = srv.host, ""
-		}
-		return srv, nil
+		return dnsServer{address: s}, nil
 	}
 	if isIP(s) {
-		return dnsServer{address: s, ip: s}, nil
+		return dnsServer{address: s}, nil
 	}
 	host, portStr, err := net.SplitHostPort(s)
 	if err != nil || !isIP(host) {
@@ -733,7 +735,7 @@ func parseDNS(s, def string) (dnsServer, error) {
 	if err != nil || port <= 0 || port > 65535 {
 		return dnsServer{}, errors.New("端口无效")
 	}
-	return dnsServer{address: host, port: port, ip: host}, nil
+	return dnsServer{address: host, port: port}, nil
 }
 
 func ValidateDNS(s string) error {

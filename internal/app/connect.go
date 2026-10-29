@@ -97,8 +97,8 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 		// The core files are being checked or replaced, missing or too old: connect once that is done.
 		a.WaitCore = true
 		switch {
-		case a.CoreBusy:
-			a.QueueLog("[RayDock] Xray 核心正在准备，完成后自动连接")
+		case a.CoreBusy || a.coreHold:
+			a.QueueLog("[RayDock] Xray 核心文件正在准备，完成后自动连接")
 		case a.CoreReady() && opts.TUN.Enabled && a.CoreVersion == "":
 			a.EnsureCore() // verify the existing executable before allowing TUN
 		default:
@@ -295,6 +295,23 @@ func (a *App) pending() bool {
 	front, err := xray.BuildFront(o, f.f)
 	return err != nil || !bytes.Equal(front, f.cfg) // e.g. a TUN option without TUN changes nothing
 }
+
+// connectionTarget returns the actual serving target only once it agrees with the
+// UI's current plan. Checks must not label requests to an old listener as a new node.
+// A no-op plan may allocate new snapshots but keeps the same committed target.
+func (a *App) connectionTarget() *coreTarget {
+	t := a.live.Load()
+	if a.closing || a.Conn != StateOn || t == nil || t.id != a.ActiveID ||
+		t.seq != a.pairSeq || t.connSeq != a.connSeq || a.run == nil || a.frontRun == nil ||
+		t.run.core != a.run.core || !bytes.Equal(t.run.cfg, a.run.cfg) || !bytes.Equal(t.front.cfg, a.frontRun.cfg) {
+		return nil
+	}
+	return t
+}
+
+// Checkable reports whether the connection can be checked now (TestReal, CheckOverview): connected, and
+// with no change planned that the cores have yet to carry out.
+func (a *App) Checkable() bool { return a.connectionTarget() != nil }
 
 // ProxyPort describes the committed listener while connected; edited settings wait for a reconnect.
 func (a *App) ProxyPort() int {

@@ -70,7 +70,8 @@ type State struct {
 	ProxyBackup *ProxyBackup `json:"proxyBackup,omitempty"`
 	// Ports are dedicated local ports by node ID: each always proxies through its node, whatever is connected.
 	Ports map[string]int `json:"ports,omitempty"`
-	// GeoTag is the rule data release installed by updating it; empty while the core's own data is used.
+	// GeoTag is the rule data release installed: by updating it, or from the installer; empty for rule data
+	// of unknown release (the official core's own, or an older installer's).
 	GeoTag string `json:"geoTag,omitempty"`
 }
 
@@ -132,8 +133,33 @@ func migrateGroups(st *State, data []byte) {
 }
 
 // Save writes a temporary file and renames it, so a crash never leaves a corrupt file.
-func Save(path string, st State) error {
-	data, err := json.MarshalIndent(st, "", "  ")
+func Save(path string, st State) error { return writeJSON(path, st) }
+
+// Traffic is the traffic of each day by its local date ("2006-01-02"), which LoadTraffic and SaveTraffic
+// keep in a file of its own: it changes every second traffic flows, settings rarely.
+type Traffic struct {
+	Days map[string]xray.Traffic `json:"days"`
+}
+
+// LoadTraffic reads path; a file that does not exist is no traffic yet.
+func LoadTraffic(path string) (Traffic, error) {
+	var t Traffic
+	data, err := os.ReadFile(path)
+	if err == nil {
+		err = json.Unmarshal(data, &t)
+	} else if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if err != nil {
+		return Traffic{}, err
+	}
+	return t, nil
+}
+
+func SaveTraffic(path string, t Traffic) error { return writeJSON(path, t) }
+
+func writeJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}

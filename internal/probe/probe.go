@@ -68,6 +68,17 @@ func ViaProxy(ctx context.Context, proxyPort int, target string, timeout time.Du
 // response headers is returned: one trip to the server and on to target. It measures nodes reached over
 // UDP, which a TCP handshake cannot.
 func Through(ctx context.Context, port int, target string, timeout time.Duration) (time.Duration, error) {
+	return twice(ctx, port, http.MethodGet, target, timeout, func(status int, _ []byte) error {
+		if status >= 400 {
+			return fmt.Errorf("HTTP %d", status)
+		}
+		return nil
+	})
+}
+
+// twice makes the request of Through: check judges each response by its status and the start of its
+// body, and its error ends the measurement.
+func twice(ctx context.Context, port int, method, target string, timeout time.Duration, check func(status int, body []byte) error) (time.Duration, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	proxy := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
@@ -75,10 +86,12 @@ func Through(ctx context.Context, port int, target string, timeout time.Duration
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr}
 	get := func() (time.Duration, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		req, err := http.NewRequestWithContext(ctx, method, target, nil)
 		if err != nil {
 			return 0, err
 		}
+		// Some sites answer clients they do not take for browsers otherwise.
+		req.Header.Set("User-Agent", browserAgent)
 		start := time.Now()
 		resp, err := client.Do(req)
 		if err != nil {
@@ -86,18 +99,18 @@ func Through(ctx context.Context, port int, target string, timeout time.Duration
 		}
 		elapsed := time.Since(start)
 		// Read to the end, so the connection is reused.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
-		}
-		return elapsed, nil
+		return elapsed, check(resp.StatusCode, body)
 	}
 	if _, err := get(); err != nil {
 		return 0, err
 	}
 	return get()
 }
+
+const browserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
 // IPURLs answer with the caller's public IP as plain text. ExitIP asks them in order; they are run by
 // different providers, so one being unreachable through a node does not leave it without an answer.

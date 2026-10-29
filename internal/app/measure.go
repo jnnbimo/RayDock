@@ -89,10 +89,20 @@ func (a *App) TestLatency(ids []string) error {
 			a.Post(func() {
 				if a.measurementCurrent(j.id, j.source) {
 					a.Latency[j.id] = l
+				} else if a.Latency[j.id].Testing {
+					delete(a.Latency, j.id) // measured with settings since changed: no result
 				}
 			})
 		})
-		a.Post(func() { a.LatencyBusy = false })
+		a.Post(func() {
+			a.LatencyBusy = false
+			// Nodes whose result never came, the test ended early: they are not testing any more.
+			for _, j := range jobs {
+				if a.Latency[j.id].Testing {
+					delete(a.Latency, j.id)
+				}
+			}
+		})
 	}()
 	return nil
 }

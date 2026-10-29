@@ -267,6 +267,7 @@ func runningFake(t *testing.T, a *App, id string) (release func()) {
 		t.Fatal(err)
 	}
 	a.Conn, a.ActiveID, a.runningPort = StateOn, id, opts.Port
+	a.connCtx, a.connCancel = context.WithCancel(a.workCtx)
 	a.run, a.frontRun = run, &frontCore{cfg: cfg, f: f}
 	a.planned = &coreTarget{seq: a.pairSeq, connSeq: a.connSeq, id: id, run: run, front: a.frontRun, drain: true, ctx: a.pairCtx, drains: a.drainCtx}
 	gate := make(chan struct{})

@@ -175,7 +175,7 @@ func Install(ctx context.Context, client *http.Client, rel Release, dir string, 
 	for _, f := range zr.File {
 		files[f.Name] = f
 	}
-	return stage(dir, nil, func(name, dst string) (bool, error) {
+	return stage(dir, CoreFiles(), licenseFiles, nil, func(name, dst string) (bool, error) {
 		f := files[name]
 		if f == nil {
 			return false, nil
@@ -186,10 +186,19 @@ func Install(ctx context.Context, client *http.Client, rel Release, dir string, 
 
 // CopyCore copies the core in src (e.g. the bundled one) into dir, replacing files like Install.
 func CopyCore(src, dir string, keep []string) error {
+	return copyFiles(src, dir, CoreFiles(), licenseFiles, keep)
+}
+
+// CopyGeo installs a separately downloaded, verified rule set without touching the executable.
+func CopyGeo(src, dir string) error {
+	return copyFiles(src, dir, GeoFiles, nil, nil)
+}
+
+func copyFiles(src, dir string, required, optional, keep []string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return stage(dir, keep, func(name, dst string) (bool, error) {
+	return stage(dir, required, optional, keep, func(name, dst string) (bool, error) {
 		in, err := os.Open(filepath.Join(src, name))
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -202,18 +211,16 @@ func CopyCore(src, dir string, keep []string) error {
 	})
 }
 
-// stage writes CoreFiles and licenses through put as *.new files in dir and renames them once all core
-// files are present; on failure existing files stay. Files in keep that dir has are left alone. put
-// returns false when the source lacks a file.
-func stage(dir string, keep []string, put func(name, dst string) (bool, error)) error {
+// stage writes a file set through put as *.new files and commits only once all
+// required files are present. Files in keep that dir has are left alone.
+func stage(dir string, required, optional, keep []string, put func(name, dst string) (bool, error)) error {
 	var staged, missing []string
 	defer func() {
 		for _, p := range staged {
 			os.Remove(p)
 		}
 	}()
-	required := CoreFiles()
-	for i, name := range append(required, licenseFiles...) {
+	for i, name := range slices.Concat(required, optional) {
 		if slices.Contains(keep, name) && exists(filepath.Join(dir, name)) {
 			continue
 		}

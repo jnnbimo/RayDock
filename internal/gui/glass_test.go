@@ -55,7 +55,7 @@ func TestSoftwareGlassPreserved(t *testing.T) {
 
 func TestSoftwareBackdropCache(t *testing.T) {
 	h := apptest.New(t)
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, MainWidth, MainHeight)
 	if !v.SoftwareRendering() || v.ambient.canvas == nil {
 		t.Fatal("headless rendering must use the cached backdrop")
@@ -94,7 +94,7 @@ func TestSoftwareBackdropCache(t *testing.T) {
 	tt.SetScale(1)
 	tt.SetDark(false)
 	tt.SetSize(MainWidth, MainHeight)
-	fresh := ui.NewTester(New(h.A).Build, MainWidth, MainHeight)
+	fresh := ui.NewTester(nodesView(h.A).Build, MainWidth, MainHeight)
 	if !bytes.Equal(tt.Image().Pix, fresh.Image().Pix) {
 		t.Fatal("resize/theme cycle left stale pixels")
 	}

@@ -248,24 +248,61 @@ func TestBackendLocal(t *testing.T) {
 	}
 	// The local server, not the remote DNS one, resolves the nodes' domains; its queries go direct.
 	for path, want := range map[string]any{
-		"dns.servers.0.address":       "192.168.1.1",
-		"dns.servers.0.domains.0":     "full:front.example.com",
-		"dns.servers.0.domains.1":     "full:t.example.com",
-		"dns.servers.0.domains.2":     nil,
-		"dns.servers.0.skipFallback":  true,
-		"dns.servers.1.address":       "223.5.5.5",
-		"routing.rules.2.ip.0":        "192.168.1.1",
-		"routing.rules.2.ip.1":        nil,
-		"routing.rules.2.outboundTag": tagDirect,
+		"dns.servers.0.address":      "192.168.1.1",
+		"dns.servers.0.domains.0":    "full:front.example.com",
+		"dns.servers.0.domains.1":    "full:t.example.com",
+		"dns.servers.0.domains.2":    nil,
+		"dns.servers.0.skipFallback": true,
+		"dns.servers.0.tag":          tagDNS,
+		"dns.servers.1.address":      "8.8.8.8",
+		"dns.servers.1.tag":          tagDNS,
+		"dns.servers.2.address":      "223.5.5.5",
+		"dns.servers.3.tag":          tagRemoteDNS,
 	} {
 		if got := at(m, path); got != want {
 			t.Errorf("%s = %v, want %v", path, got, want)
 		}
 	}
-	// With none left, the domestic DNS resolves them.
+	// A shared resolver can bootstrap nodes directly without sending remote queries direct.
 	b.Local.DNS = []string{"8.8.8.8"}
+	m = decodeJSON(t, mustBackend(t, o, b))
+	if at(m, "dns.servers.0.address") != "8.8.8.8" || at(m, "dns.servers.0.tag") != tagDNS ||
+		!contains(at(m, "dns.servers.0.domains"), "full:front.example.com") {
+		t.Errorf("servers %v", at(m, "dns.servers"))
+	}
+	if _, tag := findRule(rulesIn(m), "inboundTag", tagDNS); tag != tagDirectDNS {
+		t.Fatalf("node DNS must go direct: %s", tag)
+	}
+	// Without a physical resolver, the domestic DNS resolves node addresses.
+	b.Local.DNS = nil
 	m = decodeJSON(t, mustBackend(t, o, b))
 	if at(m, "dns.servers.0.address") != "223.5.5.5" || !contains(at(m, "dns.servers.0.domains"), "full:front.example.com") {
 		t.Errorf("servers %v", at(m, "dns.servers"))
+	}
+}
+
+// Private addresses the routing sends direct are reached: Xray's freedom refuses them behind the relay's VLESS
+// inbound otherwise. Open to the LAN, the local port must not take other devices to this computer's services.
+func TestDirectReachesPrivate(t *testing.T) {
+	for _, lan := range []bool{false, true} {
+		o := DefaultOptions()
+		o.AllowLAN = lan
+		rules, _ := at(outboundsByTag(decodeMain(t, o))[tagDirect], "settings.finalRules").([]any)
+		if len(rules) == 0 || at(rules[len(rules)-1], "action") != "allow" || at(rules[len(rules)-1], "ip") != nil {
+			t.Fatalf("lan %v: the last rule must allow everything: %v", lan, rules)
+		}
+		loopback := len(rules) == 2 && at(rules[0], "action") == "block" && at(rules[0], "ip.0") == "127.0.0.0/8" && at(rules[0], "ip.1") == "::1/128"
+		if loopback != lan || len(rules) != map[bool]int{false: 1, true: 2}[lan] {
+			t.Fatalf("lan %v: loopback refused %v: %v", lan, loopback, rules)
+		}
+		// The DNS module's own queries leave by an outbound without the rules: a resolver on this computer
+		// is still asked.
+		m := decodeMain(t, o)
+		if dns := outboundsByTag(m)[tagDirectDNS]; dns == nil || at(dns, "settings.finalRules") != nil {
+			t.Fatalf("lan %v: DNS outbound %v", lan, dns)
+		}
+		if _, tag := findRule(rulesIn(m), "inboundTag", tagDNS); tag != tagDirectDNS {
+			t.Fatalf("lan %v: DNS queries go to %q", lan, tag)
+		}
 	}
 }

@@ -66,7 +66,7 @@ func BuildFront(o Options, f Front) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, procs = routing(o, rules, dnsServer{}, dnsServer{}, tagProxy)
+		_, procs = routing(o, rules, tagProxy)
 	}
 	gen := fmt.Sprintf("f%d/", f.Gen)
 	mixed := mixedTag(o)

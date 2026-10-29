@@ -10,13 +10,14 @@ import (
 
 // commitFiles installs a verified *.new set and rolls back on failure.
 // Rollback errors retain the backup and accompany the original error.
-// Running Windows binaries can be moved but not deleted; retire backups later.
+// Running Windows binaries can be moved but not deleted. Only successfully
+// committed backups are marked retired and eligible for later cleanup.
 func commitFiles(staged []string) error {
 	if len(staged) == 0 {
 		return nil
 	}
 	dir := filepath.Dir(staged[0])
-	old, _ := filepath.Glob(filepath.Join(dir, "rollback-*"))
+	old, _ := filepath.Glob(filepath.Join(dir, "retired-*"))
 	for _, d := range old {
 		_ = os.RemoveAll(d) // what a core still runs from stays for the next time
 	}
@@ -78,6 +79,15 @@ func commitFiles(staged []string) error {
 			return rollback(err)
 		}
 		files[i].installed = true
+	}
+	// A crash or failed rollback leaves rollback-* untouched, including by future
+	// commits. Rename only after the complete new set is installed. If retirement
+	// cannot be marked, conservatively keep that backup rather than risking data.
+	retired := filepath.Join(dir, "retired-"+strings.TrimPrefix(filepath.Base(backupDir), "rollback-"))
+	if err := os.Rename(backupDir, retired); err == nil {
+		backupDir = retired
+	} else {
+		cleanup = false
 	}
 	return nil
 }

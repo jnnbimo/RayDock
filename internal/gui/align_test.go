@@ -19,7 +19,7 @@ func TestPagesAlign(t *testing.T) {
 	a.ImportLinks(apptest.LinkA+"\n"+apptest.LinkB, "")
 	a.QueueLog("[RayDock] 日志第一行")
 	a.FlushLogs()
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, MainWidth, MainHeight)
 	show := func(path string) {
 		v.router.Push(path)

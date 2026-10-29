@@ -13,7 +13,7 @@ import (
 func TestDialogFitsWithError(t *testing.T) {
 	h := apptest.New(t)
 	const w, ht = 980, 620 // the window's minimum size
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, w, ht)
 	v.openAddNode()
 	v.nf.mode = 1 // fill in a node, the longest form
@@ -38,7 +38,7 @@ func TestDialogFitsWithError(t *testing.T) {
 // error, in any dialog, moves nothing: the dialog keeps its height and place.
 func TestDialogErrorMovesNothing(t *testing.T) {
 	h := apptest.New(t)
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	cancel := func() ui.Rect {
 		t.Helper()

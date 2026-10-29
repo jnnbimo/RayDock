@@ -15,9 +15,16 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
+// nodesView is the main window shown on the nodes page, which most tests work on.
+func nodesView(a *app.App) *View {
+	v := New(a)
+	v.router.Push("/nodes")
+	return v
+}
+
 func TestImportAndUI(t *testing.T) {
 	h := apptest.New(t)
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	if !tt.HasText("还没有节点") {
 		t.Fatalf("missing empty state: %q", tt.Texts())
@@ -77,7 +84,7 @@ func TestPages(t *testing.T) {
 	h.A.ImportLinks(apptest.LinkA, "")
 	h.A.QueueLog("2026/10/14 [Warning] core: Xray 26.3.27 started")
 	h.A.FlushLogs()
-	tt := ui.NewTester(New(h.A).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(h.A).Build, 1180, 760)
 	for _, pg := range []struct{ item, want string }{
 		{"日志", "core: Xray 26.3.27 started"},
 		{"设置", "启动后自动连接"},
@@ -105,7 +112,7 @@ func TestAdminDialog(t *testing.T) {
 	a := h.A
 	a.ImportLinks(apptest.LinkA, "")
 	a.State.SelectedID = a.State.Nodes[0].ID
-	tt := ui.NewTester(New(a).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(a).Build, 1180, 760)
 	a.SetTUN(true)
 	tt.Frame()
 	if !a.AdminPrompt || !tt.HasText("以管理员身份重启") {
@@ -122,7 +129,7 @@ func TestAdminDialog(t *testing.T) {
 
 func TestAutostartSetting(t *testing.T) {
 	h := apptest.New(t)
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	v.router.Push("/settings")
 	tt.Frame()
@@ -149,7 +156,7 @@ func TestGroupsUI(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
 	a.ImportLinks(apptest.LinkA, "")
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	if err := tt.Click("添加分组"); err != nil {
 		t.Fatal(err)
@@ -232,7 +239,7 @@ func TestDeleteWhileShown(t *testing.T) {
 	a.ImportLinks(apptest.LinkA+"\n"+apptest.LinkB, "")
 	other, _ := a.AddGroup(app.GroupInput{Name: "其它"})
 	a.ImportLinks("socks://dXNlcjpwYXNz@10.0.0.2:1080#家里", other)
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	v.group = a.State.Groups[0].ID
 	tt.Frame()
@@ -270,7 +277,7 @@ func TestClearLogsWhileShown(t *testing.T) {
 		h.A.QueueLog(fmt.Sprintf("line %d", i))
 	}
 	h.A.FlushLogs()
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	v.router.Push("/logs")
 	tt.Frame()
@@ -294,7 +301,7 @@ func TestDeleteNodeFromMenu(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.State.Groups[0].Front = idA
-	tt := ui.NewTester(New(a).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(a).Build, 1180, 760)
 	// Deleting asks first, telling what goes with the node; cancelling keeps it.
 	chooseFromMenu(t, tt, "a.example.com:443", "删除")
 	for _, want := range []string{"确定删除节点“节点A”吗？删除后无法恢复。", "它的专用端口 20001 也会一并移除。",
@@ -332,7 +339,7 @@ func TestSortNodes(t *testing.T) {
 		"trojan://p@a.example.com:443#Alpha",
 		"trojan://p@z.example.com:443#Zulu",
 	}, "\n"), "")
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	names := func() []string {
 		var out []string
@@ -382,7 +389,7 @@ func TestPortDialog(t *testing.T) {
 	a := h.A
 	a.ImportLinks(apptest.LinkA, "")
 	id := a.State.Nodes[0].ID
-	tt := ui.NewTester(New(a).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(a).Build, 1180, 760)
 	chooseFromMenu(t, tt, "a.example.com:443", "设置专用端口")
 	tt.Frame()
 	if !tt.HasText("专用端口") || !tt.HasText("「节点A」") {
@@ -424,7 +431,7 @@ func TestPortDialog(t *testing.T) {
 func TestNodeMenuOrder(t *testing.T) {
 	h := apptest.New(t)
 	h.A.ImportLinks(apptest.LinkA, "")
-	tt := ui.NewTester(New(h.A).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(h.A).Build, 1180, 760)
 	openRowMenu(t, tt, "a.example.com:443")
 	want := []string{"连接", "编辑", "测速", "测延迟", "节点分享", "设置专用端口", "删除"}
 	// The menu is built last; each item shows its text once and is labeled with it once.
@@ -447,7 +454,7 @@ func TestShareNode(t *testing.T) {
 	a := h.A
 	a.ImportLinks(apptest.LinkA, "")
 	link := a.State.Nodes[0].Link
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	openRowMenu(t, tt, "a.example.com:443")
 	if tt.HasText("复制分享链接") || tt.HasText("二维码分享") {
@@ -522,7 +529,7 @@ func TestSpeedFromMenu(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
 	a.ImportLinks(apptest.LinkA, "")
-	tt := ui.NewTester(New(a).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(a).Build, 1180, 760)
 	if tt.HasText("测速") {
 		t.Fatalf("no speed test button: %q", tt.Texts())
 	}
@@ -544,7 +551,7 @@ func TestRowMenuKeyboardEdit(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
 	a.ImportLinks(apptest.LinkB, "")
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	if err := tt.Click("b.example.com:443"); err != nil {
 		t.Fatal(err)
@@ -632,7 +639,7 @@ func TestDragToReorder(t *testing.T) {
 	link := func(name string) string { return "trojan://p@" + name + ".example.com:443?security=tls#节点" + name }
 	a.ImportLinks(strings.Join([]string{link("a"), link("b"), link("c")}, "\n"), "")
 	other, _ := a.AddGroup(app.GroupInput{Name: "其它"})
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	v.group = a.State.Groups[0].ID
 	tt.Frame()
@@ -672,7 +679,7 @@ func TestGeoUpdateUI(t *testing.T) {
 	a := h.A
 	a.InstallCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 1400) // the section is below the fold at the default height
 	v.router.Push("/settings")
 	v.settingsTab = 1
@@ -699,7 +706,7 @@ func TestButtonCursor(t *testing.T) {
 	h := apptest.New(t)
 	h.A.ImportLinks(apptest.LinkA, "")
 	h.A.StartBusy = true // a disabled control shows the hand too, as MyGo leaves it
-	tt := ui.NewTester(New(h.A).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(h.A).Build, 1180, 760)
 	check := func(want ui.Cursor, labels ...string) {
 		t.Helper()
 		for _, label := range labels {
@@ -742,7 +749,7 @@ func TestButtonCursor(t *testing.T) {
 // Each routing mode's segment explains that mode, whichever is chosen.
 func TestModeTooltips(t *testing.T) {
 	h := apptest.New(t)
-	tt := ui.NewTester(New(h.A).Build, 1180, 760)
+	tt := ui.NewTester(nodesView(h.A).Build, 1180, 760)
 	for _, m := range []struct{ label, hint string }{
 		{"全局", "除局域网外全部走代理"}, {"直连", "全部直连，不使用节点"}, {"绕过大陆", "中国大陆网站与 IP 直连，其余走代理"},
 	} {
@@ -772,7 +779,7 @@ func TestMeasuredViaTooltip(t *testing.T) {
 	a.ImportLinks("socks://member.example:3333#成员", g)
 	member := a.State.Nodes[1].ID
 	a.Latency[member] = app.Latency{Duration: 321 * time.Millisecond}
-	v := New(a)
+	v := nodesView(a)
 	v.group = g
 	tt := ui.NewTester(v.Build, 1180, 760)
 	tt.Frame()
@@ -797,7 +804,7 @@ func TestExitIPColumn(t *testing.T) {
 	a.Latency[n[0].ID] = app.Latency{Duration: 120 * time.Millisecond, IP: "203.0.113.7"}
 	a.Latency[n[1].ID] = app.Latency{Duration: 90 * time.Millisecond, IPErr: "失败"}
 	a.Latency[n[2].ID] = app.Latency{Err: "超时"}
-	v := New(a)
+	v := nodesView(a)
 	v.group = n[0].GroupID
 	tt := ui.NewTester(v.Build, 1180, 760)
 	tt.Frame()
@@ -815,7 +822,7 @@ func TestNodeColumnsStable(t *testing.T) {
 	a := h.A
 	a.ImportLinks("socks://a.example:1080#甲\nsocks://b.example:1080#乙", "")
 	n := a.State.Nodes
-	v := New(a)
+	v := nodesView(a)
 	v.group = n[0].GroupID
 	tt := ui.NewTester(v.Build, 1180, 760)
 	tt.Frame()

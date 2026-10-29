@@ -94,21 +94,25 @@ func TestIntegrationSwitchInPlace(t *testing.T) {
 		backend = a.run.core
 	}
 
-	old := backend
+	old, connectedSince := backend, a.Since
 	start = time.Now()
 	a.Connect(second, nil)
 	settle()
+	if !a.Since.After(connectedSince) {
+		t.Fatal("another node: connected since it was switched to")
+	}
 	t.Logf("another node: %v", time.Since(start).Round(time.Millisecond))
 	cores("another node", true)
 	if a.ActiveID != second || old.Running() || running() != 2 {
 		t.Fatalf("another node: id %s; the old backend core stops at once: %v; %d cores", a.ActiveID, old.Running(), running())
 	}
-	since := a.Since
+	since, key := a.Since, a.OverviewKey()
 	a.SetMode(xray.ModeGlobal)
 	settle()
 	cores("a routing mode", false)
-	if a.run.switches != 1 || !a.Since.After(since) {
-		t.Fatalf("a routing mode: run %+v since %v → %v", a.run, since, a.Since)
+	// The same node stays connected since it connected; the route its requests take changed.
+	if a.run.switches != 1 || a.Since != since || a.OverviewKey() == key {
+		t.Fatalf("a routing mode: run %+v since %v → %v, key %s → %s", a.run, since, a.Since, key, a.OverviewKey())
 	}
 	logs := strings.Join(logTexts(a), "\n")
 	if !strings.Contains(logs, "经原节点的连接已断开") || !strings.Contains(logs, "已建立的连接不中断") || strings.Contains(logs, "无法在运行中") {

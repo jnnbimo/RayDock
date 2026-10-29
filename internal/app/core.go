@@ -56,6 +56,10 @@ func (a *App) EnsureCore() {
 	if a.CoreBusy || a.closing {
 		return
 	}
+	if a.GeoBusy {
+		a.afterGeo = a.EnsureCore
+		return
+	}
 	if missing := xray.Missing(a.CoreDir()); len(missing) > 0 {
 		if a.bundledReady() {
 			a.seedCore()
@@ -100,14 +104,17 @@ func (a *App) EnsureCore() {
 				a.InstallCore()
 				return
 			}
+			if newerVersion(bv, v) {
+				a.CoreLatest, a.latestBundled = bv, true
+			}
+			if a.seedGeo() {
+				return // which then connects, and starts the cores, as below
+			}
 			if a.WaitCore {
 				a.Connect(a.ActiveID, nil)
 			}
 			a.SyncCores()
 			a.PinCertificates()
-			if newerVersion(bv, v) {
-				a.CoreLatest = bv
-			}
 		})
 	}()
 }
@@ -137,7 +144,7 @@ func (a *App) CheckCoreUpdate() {
 				a.CoreNote = "检查更新失败：" + err.Error()
 				a.QueueLog("[RayDock] " + a.CoreNote)
 			case newerVersion(rel.Tag, current):
-				a.CoreLatest = rel.Tag
+				a.CoreLatest, a.latestBundled = rel.Tag, false
 			default:
 				a.CoreNote = "已是最新版本"
 			}
@@ -167,6 +174,16 @@ func parseVersion(s string) []int {
 func newerVersion(tag, cur string) bool {
 	t, c := parseVersion(tag), parseVersion(cur)
 	return t != nil && c != nil && slices.Compare(t, c) > 0
+}
+
+// UpdateCore installs the core offered (CoreLatest): the bundled one offline when it is that, else the newest
+// official release.
+func (a *App) UpdateCore() {
+	if a.latestBundled && a.bundledReady() {
+		a.seedCore()
+		return
+	}
+	a.InstallCore()
 }
 
 // InstallCore downloads the newest official core and installs it (coreJob).
@@ -238,31 +255,49 @@ func (a *App) coreJob(msg, verb string, prepare func(client *http.Client) (strin
 // new. Nothing new may start from the files meanwhile: tests running are waited for, the core operations
 // wait their turn. Then the cores are renewed beside the running ones (coreDone).
 func (a *App) replaceCore(verb, src string) {
-	a.coreHold, a.CoreMsg = true, "正在替换 Xray 核心…"
+	a.CoreMsg = "正在替换 Xray 核心…"
+	dir, exe, readVersion, download := a.CoreDir(), a.coreExe(), a.ReadCoreVersion, a.downloadDir()
+	// The rule data installed stays (CopyCore): it is updated by itself, or by the installer's (seedGeo).
+	// Where there is none, the core's comes with it: the installer's, of a known release, or the
+	// official package's own.
+	geoTag := ""
+	if src == a.BundledCore && slices.ContainsFunc(xray.GeoFiles, func(f string) bool { return slices.Contains(xray.Missing(dir), f) }) {
+		geoTag = xray.ReadGeoTag(src)
+	}
+	a.replaceFiles(func() {
+		err := xray.CopyCore(src, dir, xray.GeoFiles)
+		if src == download {
+			_ = os.RemoveAll(download)
+		}
+		v := ""
+		installed := err == nil
+		if installed {
+			if v, err = readVersion(exe); err != nil {
+				v, err = "", fmt.Errorf("核心版本验证失败：%w", err)
+			}
+		}
+		a.Post(func() {
+			if installed && geoTag != "" {
+				a.State.GeoTag = geoTag
+				a.Save()
+			}
+			a.coreDone(verb, installed, v, err)
+		})
+	})
+}
+
+// replaceFiles is the shared commit barrier for executables and rule data. Downloads
+// are already staged elsewhere. Stop new tests, await existing workers, then commit
+// in core-operation order so no startup or API config load sees a partial file set.
+// replace runs on the core queue and posts completion to release coreHold.
+func (a *App) replaceFiles(replace func()) {
+	a.coreHold = true
 	a.StopSpeedTest()
 	a.jobs.Add(1)
 	go func() {
 		defer a.jobs.Done()
 		a.tests.Wait()
-		a.Post(func() {
-			dir, exe, readVersion, download := a.CoreDir(), a.coreExe(), a.ReadCoreVersion, a.downloadDir()
-			a.coreDo(func() {
-				// Rule data in place stays: it is updated on its own (UpdateGeo), and since 26.10.21 the
-				// packages carry a reduced geoip.dat without the country codes (geoip:jp) rules may use.
-				err := xray.CopyCore(src, dir, xray.GeoFiles)
-				if src == download {
-					_ = os.RemoveAll(download)
-				}
-				v := ""
-				installed := err == nil
-				if installed {
-					if v, err = readVersion(exe); err != nil {
-						v, err = "", fmt.Errorf("核心版本验证失败：%w", err)
-					}
-				}
-				a.Post(func() { a.coreDone(verb, installed, v, err) })
-			})
-		})
+		a.Post(func() { a.coreDo(replace) })
 	}()
 }
 
@@ -283,7 +318,7 @@ func (a *App) coreDone(verb string, installed bool, v string, err error) {
 		a.CoreErr = verb + " Xray 核心失败：" + err.Error()
 		a.QueueLog("[RayDock] " + a.CoreErr)
 	} else {
-		a.CoreLatest = ""
+		a.CoreLatest, a.latestBundled = "", false
 		a.QueueLog("[RayDock] 已安装 Xray " + cmp.Or(v, "核心"))
 	}
 	switch {
@@ -299,4 +334,5 @@ func (a *App) coreDone(verb string, installed bool, v string, err error) {
 		a.QueueLog("[RayDock] 改用新核心，已建立的连接不中断")
 		a.RenewCores()
 	}
+	a.seedGeo()
 }

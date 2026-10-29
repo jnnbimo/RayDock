@@ -189,7 +189,7 @@ func (a *View) localProxyRow(c *ui.Context) {
 			})
 			ui.Text(c, a.ProxyAddr()).FontSize(12.5).Font("monospace").SingleLine()
 		})
-		if toolButton(c, icGlobe, "测试连接（经代理访问 Google）", p.text).Disabled(a.Conn != app.StateOn || a.RealTest.Testing).Clicked() {
+		if toolButton(c, icGlobe, "测试连接（经代理访问 Google）", p.text).Disabled(!a.Checkable() || a.RealTest.Testing).Clicked() {
 			a.TestReal()
 		}
 		if toolButton(c, icCopy, "复制地址（SOCKS5 / HTTP）", p.text).Clicked() {

@@ -20,6 +20,30 @@ import (
 // a directory without rule data, and puts Loyalsoldier's into the installer (cmd/fetchcore).
 var GeoFiles = []string{"geoip.dat", "geosite.dat"}
 
+// GeoTagFile, beside rule data of a release, holds its tag: cmd/fetchcore puts it in the installer's core
+// directory, so that RayDock knows the rule data it brings.
+const GeoTagFile = "geo.tag"
+
+// ReadGeoTag returns the tag in dir's GeoTagFile, "" without a valid one. Tags are release times
+// (202610282204), which compare as strings.
+func ReadGeoTag(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, GeoTagFile))
+	if err != nil {
+		return ""
+	}
+	tag := strings.TrimSpace(string(b))
+	if len(tag) != len("200601021504") || strings.Trim(tag, "0123456789") != "" {
+		return ""
+	}
+	return tag
+}
+
+// NewerGeo reports whether rule data tag is newer than installed, "" for rule data of unknown release:
+// the core's own, or an older installer's.
+func NewerGeo(tag, installed string) bool {
+	return tag != "" && (installed == "" || len(installed) == len(tag) && tag > installed)
+}
+
 // Where rule data releases are listed and downloaded; tests point them at a local server.
 var (
 	geoAPI       = "https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases/latest"

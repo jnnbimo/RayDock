@@ -165,6 +165,7 @@ func TestHotSwitchRejectsOldRealTest(t *testing.T) {
 	first, second := &a.State.Nodes[0], &a.State.Nodes[1]
 	a.State.Settings.Port = port
 	defer runningFake(t, a, first.ID)()
+	a.live.Store(a.planned) // the old listener is already committed, not merely planned
 	a.TestReal()
 	select {
 	case <-started:

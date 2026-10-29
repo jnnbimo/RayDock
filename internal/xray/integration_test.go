@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -116,7 +117,7 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", n.Transport(), err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("%s %s: core rejected config: %v", n.Protocol, n.Transport(), err)
 		}
 	}
@@ -127,7 +128,7 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", mode, err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("%s: core rejected config: %v", mode, err)
 		}
 	}
@@ -141,7 +142,7 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("chain %d: %v", i, err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("chain %d: core rejected config: %v", i, err)
 		}
 	}
@@ -152,13 +153,13 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("dedicated ports: core rejected backend config: %v", err)
 		}
 		if cfg, err = BuildFront(DefaultOptions(), Front{Backend: b, PortsLAN: true, Gen: 1, APIPort: 23459}); err != nil {
 			t.Fatal(err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("dedicated ports: core rejected front config: %v", err)
 		}
 	}
@@ -188,14 +189,14 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("%s: core rejected backend config: %v", name, err)
 		}
 		cfg, err = BuildFront(o, Front{Backend: b, Gen: 1, APIPort: 23459})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if err := Test(exe, cfg); err != nil {
+		if err := checkConfig(exe, cfg); err != nil {
 			t.Errorf("%s: core rejected front config: %v", name, err)
 		}
 	}
@@ -474,11 +475,21 @@ func TestIntegrationEndToEnd(t *testing.T) {
 	// old one, the front core is switched over through its API, and the old one carries its transfers to
 	// their end; only then does it stop. Routing rules alone are switched into the running backend core.
 	t.Run("seamless", func(t *testing.T) {
+		// A transfer stays open after its first KB until the test reads the rest (finishes): it outlasts
+		// a change however long the change takes.
+		resume := make(chan struct{}, 1)
 		stream := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			for range 10 {
+			w.Write(make([]byte, 1024))
+			w.(http.Flusher).Flush()
+			select {
+			case <-resume:
+			case <-r.Context().Done():
+				return
+			}
+			for range 9 {
 				w.Write(make([]byte, 1024))
 				w.(http.Flusher).Flush()
-				time.Sleep(150 * time.Millisecond)
+				time.Sleep(20 * time.Millisecond)
 			}
 		})}
 		sl, err := net.Listen("tcp", "127.0.0.1:0")
@@ -505,6 +516,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 		finishes := func(what string, resp *http.Response) {
 			t.Helper()
 			defer resp.Body.Close()
+			resume <- struct{}{}
 			if n, err := io.Copy(io.Discard, resp.Body); err != nil || n != 9*1024 {
 				t.Fatalf("%s: the transfer ended after %d bytes: %v", what, n, err)
 			}
@@ -867,7 +879,7 @@ func TestIntegrationLocalNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Test(exe, probeCfg); err != nil {
+	if err := checkConfig(exe, probeCfg); err != nil {
 		t.Errorf("core rejected the probe config: %v", err)
 	}
 }
@@ -1016,4 +1028,28 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("timed out")
 		}
 	}
+}
+
+// checkConfig checks with "xray run -test" whether the core accepts config.
+func checkConfig(exe string, config []byte) error {
+	f, err := os.CreateTemp("", "raydock-test-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(config); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "run", "-test", "-config", f.Name())
+	cmd.Env = assetEnv(exe)
+	hideWindow(cmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, lastLines(strings.TrimSpace(string(out)), 6))
+	}
+	return nil
 }

@@ -15,7 +15,7 @@ import (
 func TestChoosingMovesNothing(t *testing.T) {
 	h := apptest.New(t)
 	h.A.ImportLinks(apptest.LinkA, "")
-	v := New(h.A)
+	v := nodesView(h.A)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	at := func(s string) ui.Rect {
 		t.Helper()
@@ -53,7 +53,7 @@ func TestProxyDropDown(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
 	a.ImportLinks(apptest.LinkA+"\n"+apptest.LinkB, "")
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	v.openGroupDialog("")
 	tt.Frame()
@@ -91,7 +91,7 @@ func TestDropDownFitsDialog(t *testing.T) {
 	}
 	a.ImportLinks(links, "")
 	long := a.State.Nodes[2].Label() + " · " + a.GroupByID(a.State.Nodes[2].GroupID).Name
-	v := New(a)
+	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 760)
 	find := func(s string) ui.Rect {
 		t.Helper()

@@ -137,17 +137,33 @@ func main() {
 		// built it, while the app's state lives in a.
 		open := func(hidden bool) *mygo.Window {
 			view := gui.New(a)
+			// The window has the size of its page, which fits the home page's cards: resizing redraws their
+			// glass, and on slower renderers it stutters. The view draws minimize and close, and no maximize.
 			w := mygo.NewWindow(mygo.WindowOptions{
-				Title:         "RayDock",
-				Width:         gui.MainWidth,
-				Height:        gui.MainHeight,
-				MinWidth:      980,
-				MinHeight:     620,
-				StateKey:      "main",
-				TitleBarStyle: mygo.TitleBarHidden,
-				Hidden:        true,
-				Content:       ui.View(view.Build),
+				Title:             "RayDock",
+				Width:             gui.MainWidth,
+				Height:            gui.MainHeight,
+				UseContentSize:    true,
+				DisableResize:     true,
+				DisableMaximize:   true,
+				DisableFullScreen: true,
+				StateKey:          "main",
+				TitleBarStyle:     mygo.TitleBarHidden,
+				HideWindowButtons: true,
+				Hidden:            true,
+				Content:           ui.View(view.Build),
 			})
+			// The saved state keeps the window where it was; a size or maximized state saved while it could
+			// be resized goes.
+			w.Unmaximize()
+			w.SetContentSize(gui.MainWidth, gui.MainHeight)
+			fitWindow(w, true)
+			w.OnMove(func() { fitWindow(w, false) }) // to another display
+			view.SetWindow(w)
+			// The window's buttons are fainter while it is inactive.
+			redraw := func() { w.Update(func() {}) }
+			w.OnFocus(redraw)
+			w.OnBlur(redraw)
 			w.OnClose(func(e *mygo.CloseEvent) {
 				// Retain the text engine and ambient image on devices without a GPU.
 				// Hidden windows draw nothing; MyGo releases idle frame buffers.
@@ -170,11 +186,17 @@ func main() {
 			return w
 		}
 		open(args.autostart)
+		mygo.Screen.OnDisplaysChanged(func() {
+			if w := current(); !w.IsDestroyed() {
+				fitWindow(w, true)
+			}
+		})
 		show := func() {
 			w := current()
 			if w.IsDestroyed() {
 				w = open(false)
 			}
+			fitWindow(w, true)
 			w.Show()
 			if w.IsMinimized() {
 				w.Restore()
@@ -197,6 +219,7 @@ func main() {
 			mygo.App.OnWindowAllClosed(func() {})
 		}
 		go flushLogsLoop(a, post)
+		a.StartTraffic()
 
 		// Prepare the core first; a connect started before it is ready waits for it.
 		a.LoadAutostart()
@@ -234,6 +257,31 @@ func loadState(path string) (store.State, error) {
 	}
 	log.Printf("读取 %s 失败，已备份为 %s：%v", path, bad, err)
 	return st, nil
+}
+
+// fitWindow gives the window the page's size, or what the work area of its display leaves when that is
+// smaller (the page then scrolls), and with place moves it into the work area. Its size is the user's
+// to change no more than the page's: a display too short for it would hide the bottom of the page.
+func fitWindow(w *mygo.Window, place bool) {
+	b, cb := w.Bounds(), w.ContentBounds()
+	wa := mygo.Screen.DisplayMatching(b).WorkArea
+	if wa.Width <= 0 || wa.Height <= 0 {
+		return
+	}
+	frameW, frameH := b.Width-cb.Width, b.Height-cb.Height
+	width, height := min(gui.MainWidth, wa.Width-frameW), min(gui.MainHeight, wa.Height-frameH)
+	if width != cb.Width || height != cb.Height {
+		w.SetContentSize(width, height)
+		b = w.Bounds()
+	}
+	if !place {
+		return
+	}
+	x := max(wa.X, min(b.X, wa.X+wa.Width-b.Width))
+	y := max(wa.Y, min(b.Y, wa.Y+wa.Height-b.Height))
+	if x != b.X || y != b.Y {
+		w.SetPosition(x, y)
+	}
 }
 
 func applyAppearance(v int) {

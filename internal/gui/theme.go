@@ -129,6 +129,7 @@ func icon(shapes string) *ui.SVG {
 }
 
 var (
+	icHome       = icon(`<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9v11a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9"/>`)
 	icServer     = icon(`<rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/>`)
 	icRSS        = icon(`<path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/>`)
 	icTerminal   = icon(`<path d="m4 17 6-5-6-5M12 19h8"/>`)

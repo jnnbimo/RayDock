@@ -14,9 +14,6 @@ func (a *App) Pinning(id string) bool { return a.pinning[id] }
 // DescribePorts is how the log names the dedicated ports.
 func (a *App) DescribePorts() string { return a.describePorts(a.portRoutes()) }
 
-// ConnSeq changes whenever a connection is made or ended.
-func (a *App) ConnSeq() int { return a.connSeq }
-
 // BackendConfig is the config of the backend core planned, nil when the cores do not run.
 func (a *App) BackendConfig() []byte {
 	if a.planned == nil {

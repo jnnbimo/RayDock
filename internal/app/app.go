@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -90,21 +92,24 @@ type App struct {
 	Conn     ConnState
 	connSeq  int // bumped on every connect/disconnect to drop stale results
 	ActiveID string
-	Since    time.Time
+	Since    time.Time // connected to ActiveID since
+	routeGen int       // bumped as a change of where the connection's requests go is made (coreTarget.reroute)
 	ConnErr  string
 	ProxyErr string
 	RealTest Latency // end-to-end test through the proxy
-	WaitCore bool    // connecting, waiting for the core download
-	tunOn    bool    // the running front core has TUN enabled
+	// realTests counts the tests started, so that only the latest sets RealTest.
+	realTests int
+	WaitCore  bool // connecting, waiting for the core download
+	tunOn     bool // the running front core has TUN enabled
 	// The cores of the connection and the dedicated ports (see cores.go) as planned: as they run once the
 	// changes planned are carried out, nil until they run.
 	front    *xray.Core // the front core's process, which only a restart replaces
 	frontRun *frontCore
-	run      *runningCore // the backend core
-	planned  *coreTarget  // the newest target set for the cores (or the one they start with)
-	live     *coreTarget  // what the cores run, nil when they do not; core operations only
-	procs    coreSet      // the backend core processes, those finishing their connections too
-	pairSeq  int          // bumped whenever the cores start afresh or stop, to drop stale results
+	run      *runningCore               // the backend core
+	planned  *coreTarget                // the newest target set for the cores (or the one they start with)
+	live     atomic.Pointer[coreTarget] // actual committed target; written by core operations, read by the UI
+	procs    coreSet                    // the backend core processes, those finishing their connections too
+	pairSeq  int                        // bumped whenever the cores start afresh or stop, to drop stale results
 	// pairCtx ends when the cores start afresh or stop, ending the API calls made to them.
 	pairCtx    context.Context
 	pairCancel context.CancelFunc
@@ -152,19 +157,30 @@ type App struct {
 	CoreBusy     bool   // a core job runs: a version check, or a download or copy and the replacement
 	// coreHold keeps everything that runs the core files (connections, ports, tests) from starting while
 	// the files are being checked or replaced; a core download leaves them alone until it is complete.
-	coreHold     bool
-	CoreProgress float64
-	CoreMsg      string
-	CoreErr      string // last download failure
-	CoreLatest   string // newer release offered: found by CheckCoreUpdate, or bundled with a RayDock upgrade
-	CoreChecking bool   // CheckCoreUpdate is looking for a release
-	CoreNote     string // result of the last CheckCoreUpdate that offered nothing
+	coreHold      bool
+	CoreProgress  float64
+	CoreMsg       string
+	CoreErr       string // last download failure
+	CoreLatest    string // newer release offered: found by CheckCoreUpdate, or bundled with a RayDock upgrade
+	latestBundled bool   // CoreLatest is the bundled core, which UpdateCore installs offline
+	CoreChecking  bool   // CheckCoreUpdate is looking for a release
+	CoreNote      string // result of the last CheckCoreUpdate that offered nothing
 
 	GeoBusy     bool
 	GeoProgress float64
 	GeoMsg      string // result of the last rule data update
 	GeoErr      string
 	afterGeo    func() // a core install waiting for the rule data update
+
+	Overview Overview // the home page's check of the connection (overview.go)
+
+	// Traffic by day, and the rates of the last minute (traffic.go).
+	Traffic       store.Traffic
+	Rates         []Rate
+	trafficDue    bool          // changed since saved
+	trafficBroken bool          // the saved traffic could not be read, nor set aside: it is not overwritten
+	trafficTimer  *time.Timer   // saves the traffic a while after it moved
+	trafficDone   chan struct{} // closes after the sampler exits; nil before StartTraffic
 
 	AdminPrompt   bool // TUN needs elevation; the UI offers an elevated restart
 	StartMode     system.StartMode
@@ -209,6 +225,7 @@ func New(d Deps, st store.State) *App {
 	a.front.OnLog = a.QueueLog
 	a.drainCtx, a.drainCancel = context.WithCancel(ctx)
 	a.pairCtx, a.pairCancel = context.WithCancel(ctx)
+	a.loadTraffic()
 	return a
 }
 
@@ -256,6 +273,11 @@ func (a *App) Shutdown() {
 	a.StopSpeedTest()
 	<-a.coreDo(a.stopCores)
 	a.drains.Wait() // workCtx ended: they stop at once
+	if a.trafficDone != nil {
+		<-a.trafficDone
+	}
+	a.flushTraffic() // includes samples queued before closing and every backend's final reading
+	a.procs.closeTraffic()
 	a.endTUN()
 	a.Conn, a.ActiveID, a.WaitCore, a.runningPort = StateOff, "", false, 0
 	a.run, a.frontRun, a.planned = nil, nil, nil
@@ -265,11 +287,16 @@ func (a *App) Shutdown() {
 	a.latencyCore.Stop()
 	a.pinCore.Stop()
 	a.jobs.Wait()
+	_ = os.RemoveAll(a.geoDownloadDir())
 	if a.saveTimer != nil {
 		a.saveTimer.Stop()
 	}
+	if a.trafficTimer != nil {
+		a.trafficTimer.Stop()
+	}
 	close(a.coreOps)
 	a.Save()
+	a.saveTraffic()
 }
 
 func shortErr(err error) string {
