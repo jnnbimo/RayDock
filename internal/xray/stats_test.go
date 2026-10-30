@@ -15,24 +15,33 @@ import (
 	"raydock/internal/node"
 )
 
-// Both kinds of backend core count their outbounds and serve the counts on their API, when they have
-// one, and on nothing else: no metrics listener, which would serve Go's profiling endpoints too.
+// The core counts its outbounds and serves the counts on its API, when it has one, and on nothing else: no
+// metrics listener, which would serve Go's profiling endpoints too, and no API listener without the
+// per-process token. So does the core serving the dedicated ports alone.
 func TestStatsConfig(t *testing.T) {
 	n := &node.Node{Protocol: node.Trojan, Host: "t.example.com", Port: 443, Password: "p", Security: "tls"}
-	for _, b := range []Backend{
-		{Chain: []*node.Node{n}, Mixed: 23457},
-		{Ports: []PortRoute{{Port: 20001, Chain: []*node.Node{n}}}, Mixed: 23457},
-	} {
+	builds := map[string]func(Options) ([]byte, error){
+		"connection": func(o Options) ([]byte, error) { return Build(o, Run{Chain: []*node.Node{n}}) },
+		"ports": func(o Options) ([]byte, error) {
+			return Build(o, Run{Ports: []PortRoute{{Port: 20001, Chain: []*node.Node{n}}}})
+		},
+	}
+	for name, build := range builds {
 		o := DefaultOptions()
 		o.APIPort = 23458
-		data, err := BuildBackend(o, b)
+		if _, err := build(o); err == nil {
+			t.Fatalf("%s: an API without a token", name)
+		}
+		o.APIToken = "token"
+		data, err := build(o)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var cfg struct {
-			Stats   map[string]any
-			Metrics any
-			API     struct {
+			Stats    map[string]any
+			Metrics  any
+			Inbounds []configInbound
+			API      struct {
 				Listen   string
 				Services []string
 			}
@@ -43,15 +52,30 @@ func TestStatsConfig(t *testing.T) {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Stats == nil || cfg.Metrics != nil || cfg.API.Listen != "127.0.0.1:23458" || !slices.Contains(cfg.API.Services, "StatsService") ||
+		auth := slices.IndexFunc(cfg.Inbounds, func(in configInbound) bool {
+			return in.Tag == tagAPIAuth && in.Listen == "127.0.0.1" && in.Port == 23458 &&
+				len(in.Settings.Accounts) == 1 && in.Settings.Accounts[0].Pass == "token"
+		})
+		if cfg.Stats == nil || cfg.Metrics != nil || cfg.API.Listen != "" || auth < 0 || !slices.Contains(cfg.API.Services, "StatsService") ||
 			!cfg.Policy.System["statsOutboundUplink"] || !cfg.Policy.System["statsOutboundDownlink"] {
-			t.Fatalf("connected %v: %s", b.Connected(), data)
+			t.Fatalf("%s: %s", name, data)
 		}
 		var plain map[string]any
-		if data, _ := BuildBackend(DefaultOptions(), b); json.Unmarshal(data, &plain) != nil || plain["stats"] != nil || plain["api"] != nil {
-			t.Fatal("no API, no counting")
+		if data, _ := build(DefaultOptions()); json.Unmarshal(data, &plain) != nil || plain["stats"] != nil || plain["api"] != nil {
+			t.Fatalf("%s: no API, no counting", name)
 		}
 	}
+	// The hops before the end of a chain carry the same bytes again: they do not count.
+	if kind := trafficKind(nodePrefix + "0a1b2c3d-chain-0"); kind != "" {
+		t.Errorf("a hop counted as %q", kind)
+	}
+}
+
+// configInbound is the part of an inbound TestStatsConfig reads.
+type configInbound struct {
+	Tag, Listen string
+	Port        int
+	Settings    struct{ Accounts []struct{ User, Pass string } }
 }
 
 // protoBytes encodes a length-delimited protobuf field.
@@ -67,6 +91,13 @@ func stat(name string, value int64) []byte {
 	m = binary.AppendUvarint(m, 2<<3) // field 2, wire type 0 (varint)
 	m = binary.AppendUvarint(m, uint64(value))
 	return protoBytes(1, m)
+}
+
+// plainClient reaches statsServer, which stands for the API behind the authenticated tunnel.
+func plainClient() *http.Client {
+	p := new(http.Protocols)
+	p.SetUnencryptedHTTP2(true)
+	return &http.Client{Transport: &http.Transport{Protocols: p}}
 }
 
 // statsServer answers QueryStats as a core's API does, over HTTP/2 without TLS, with the counters given.
@@ -95,22 +126,23 @@ func statsServer(t *testing.T, status string, counters map[string]int64) int {
 	return srv.Listener.Addr().(*net.TCPAddr).Port
 }
 
-// Only the outbounds traffic leaves by count: a chain's earlier hops carry it again, wrapped.
+// Only the outbounds traffic leaves by count: a chain's earlier hops carry it again, wrapped. The chains
+// of the connection and of each dedicated port count alike.
 func TestReadTraffic(t *testing.T) {
 	port := statsServer(t, "0", map[string]int64{
-		"inbound>>>relay>>>traffic>>>uplink":               9,
-		"outbound>>>proxy>>>traffic>>>uplink":              100,
-		"outbound>>>proxy>>>traffic>>>downlink":            1000,
-		"outbound>>>chain-0>>>traffic>>>uplink":            120,
-		"outbound>>>port-20001-proxy>>>traffic>>>uplink":   10,
-		"outbound>>>port-20001-proxy>>>traffic>>>downlink": 20,
-		"outbound>>>port-20001-chain-0>>>traffic>>>uplink": 11,
-		"outbound>>>direct>>>traffic>>>uplink":             5,
-		"outbound>>>direct>>>traffic>>>downlink":           50,
-		"outbound>>>block>>>traffic>>>downlink":            1,
-		"outbound>>>dns-out>>>traffic>>>uplink":            3,
+		"inbound>>>mixed-in>>>traffic>>>uplink":               9,
+		"outbound>>>node-0a1b2c3d-proxy>>>traffic>>>uplink":   100,
+		"outbound>>>node-0a1b2c3d-proxy>>>traffic>>>downlink": 1000,
+		"outbound>>>node-0a1b2c3d-chain-0>>>traffic>>>uplink": 120,
+		"outbound>>>node-99887766-proxy>>>traffic>>>uplink":   10,
+		"outbound>>>node-99887766-proxy>>>traffic>>>downlink": 20,
+		"outbound>>>node-99887766-chain-0>>>traffic>>>uplink": 11,
+		"outbound>>>direct>>>traffic>>>uplink":                5,
+		"outbound>>>direct>>>traffic>>>downlink":              50,
+		"outbound>>>block>>>traffic>>>downlink":               1,
+		"outbound>>>dns-out>>>traffic>>>uplink":               3,
 	})
-	got, err := ReadTraffic(context.Background(), StatsClient(), port)
+	got, err := ReadTraffic(context.Background(), plainClient(), port)
 	if want := (Traffic{ProxyUp: 110, ProxyDown: 1020, DirectUp: 5, DirectDown: 50}); err != nil || got != want {
 		t.Fatalf("%+v %v", got, err)
 	}
@@ -122,7 +154,7 @@ func TestReadTraffic(t *testing.T) {
 // A failed call is an error, not zero traffic.
 func TestReadTrafficError(t *testing.T) {
 	port := statsServer(t, "14", nil)
-	if _, err := ReadTraffic(context.Background(), StatsClient(), port); err == nil {
+	if _, err := ReadTraffic(context.Background(), plainClient(), port); err == nil {
 		t.Fatal("gRPC status 14 read as counts")
 	}
 	if _, err := parseStats([]byte{0x0a, 0x05, 1}); err == nil {

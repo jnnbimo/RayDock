@@ -1,24 +1,21 @@
 package xray
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 )
 
-// A backend core counts the bytes of its outbounds, and ReadTraffic asks its API (Options.APIPort) for the
+// The core counts the bytes of its outbounds, and ReadTraffic asks its API (Options.APIPort) for the
 // counts: Xray's StatsService, over gRPC. A metrics listener would serve them too, but beside Go's
 // profiling endpoints, open to every program on the computer. Only the outbounds traffic leaves by count:
 // the proxy of the connection and of each dedicated port, and direct. The hops before them in a chain
 // carry the same bytes again, wrapped, and blocked or DNS traffic leaves by none.
 
-// Traffic is what a backend core moved since it started, in bytes. Up is sent to the destination.
+// Traffic is what a core moved since it started, in bytes. Up is sent to the destination.
 type Traffic struct {
 	ProxyUp    int64 `json:"proxyUp,omitempty"`
 	ProxyDown  int64 `json:"proxyDown,omitempty"`
@@ -39,7 +36,7 @@ func (t Traffic) Since(prev Traffic) Traffic {
 
 func (t Traffic) Zero() bool { return t == Traffic{} }
 
-// statsConfig makes a core count its outbounds, which its API serves (backendAPI).
+// statsConfig makes a core count its outbounds, which its API serves (coreAPI).
 func statsConfig(cfg obj) {
 	cfg["stats"] = obj{}
 	cfg["policy"] = obj{"system": obj{"statsOutboundUplink": true, "statsOutboundDownlink": true}}
@@ -48,21 +45,20 @@ func statsConfig(cfg obj) {
 // trafficKind tells where an outbound's traffic goes: proxy, direct, or neither ("").
 func trafficKind(tag string) string {
 	switch {
-	case tag == tagProxy:
-		return tagProxy
+	case strings.HasPrefix(tag, nodePrefix) && strings.HasSuffix(tag, "-"+tagProxy):
+		return tagProxy // the end of a chain, the connection's or a dedicated port's (nodeOutbounds)
 	case tag == tagDirect:
 		return tagDirect
-	case strings.HasPrefix(tag, portPrefix) && strings.HasSuffix(tag, "-"+tagProxy):
-		return tagProxy // the end of a dedicated port's chain
 	}
 	return ""
 }
 
-// StatsClient returns a client for ReadTraffic: gRPC is HTTP/2, here without TLS, to 127.0.0.1.
-func StatsClient() *http.Client {
+// StatsClient returns a client for the API of the core started with token (Options.APIToken): gRPC is
+// HTTP/2, here without TLS, through the core's authenticated loopback tunnel (apiDial).
+func StatsClient(token string) *http.Client {
 	p := new(http.Protocols)
 	p.SetUnencryptedHTTP2(true)
-	return &http.Client{Timeout: time.Second, Transport: &http.Transport{Protocols: p}}
+	return &http.Client{Timeout: time.Second, Transport: &http.Transport{Protocols: p, DialContext: apiDial(token)}}
 }
 
 // queryStats is the method ReadTraffic calls (app/stats/command/command.proto).
@@ -70,43 +66,11 @@ const queryStats = "/xray.app.stats.command.StatsService/QueryStats"
 
 // ReadTraffic reads the counts of the core whose API is at 127.0.0.1:port, through client (StatsClient).
 func ReadTraffic(ctx context.Context, client *http.Client, port int) (Traffic, error) {
-	// QueryStatsRequest{pattern: "outbound>>>"}: field 1, a string. Counters are named
-	// outbound>>>TAG>>>traffic>>>uplink and downlink.
-	const pattern = "outbound>>>"
-	msg := append([]byte{0x0a, byte(len(pattern))}, pattern...)
-	// A gRPC message: not compressed, its length, then it.
-	body := binary.BigEndian.AppendUint32([]byte{0}, uint32(len(msg)))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, queryStats),
-		bytes.NewReader(append(body, msg...)))
+	data, err := rpc(ctx, client, port, queryStats, wireBytes(1, []byte("outbound>>>")))
 	if err != nil {
 		return Traffic{}, err
 	}
-	req.Header.Set("Content-Type", "application/grpc")
-	req.Header.Set("TE", "trailers")
-	resp, err := client.Do(req)
-	if err != nil {
-		return Traffic{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return Traffic{}, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return Traffic{}, err
-	}
-	// The status comes in the trailers, or in the headers of a response without a message.
-	status := resp.Trailer.Get("Grpc-Status")
-	if status == "" {
-		status = resp.Header.Get("Grpc-Status")
-	}
-	if status != "0" {
-		return Traffic{}, fmt.Errorf("gRPC 状态 %s：%s", status, resp.Trailer.Get("Grpc-Message"))
-	}
-	if len(data) < 5 || data[0] != 0 || int(binary.BigEndian.Uint32(data[1:5])) != len(data)-5 {
-		return Traffic{}, errProto
-	}
-	return parseStats(data[5:])
+	return parseStats(data)
 }
 
 // parseStats reads a QueryStatsResponse: Stat messages (field 1), each a name (1) and a value (2).

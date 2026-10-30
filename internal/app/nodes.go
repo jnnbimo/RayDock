@@ -126,7 +126,7 @@ func (a *App) AddNode(groupID string, n node.Node) (string, error) {
 
 // EditNode replaces the settings and name of node n.ID with n's, checked as AddNode does. Results
 // measured with the old settings are dropped, and a connection or dedicated port using the node picks the
-// new ones up at once, on a new backend core beside the running one (SyncCores).
+// new ones up at once: the core using it restarts with them (SyncCores).
 func (a *App) EditNode(n node.Node) error {
 	old := a.NodeByID(n.ID)
 	if old == nil {
@@ -175,20 +175,20 @@ func (a *App) DeleteNode(id string) {
 // TestReal requests a page through the local proxy to check the whole path. A result measured through
 // cores that no longer serve the connection is dropped, and the test ends without one.
 func (a *App) TestReal() {
-	target := a.connectionTarget()
+	target := a.connCore()
 	if target == nil {
 		return
 	}
 	a.realTests++
 	a.RealTest = Latency{Testing: true}
-	test, port, ctx := a.realTests, target.run.opts.Port, a.connCtx
+	test, port, ctx := a.realTests, target.opts.Port, a.connCtx
 	go func() {
 		d, err := probe.ViaProxy(ctx, port, probe.TestURL, 10*time.Second)
 		a.Post(func() {
 			if test != a.realTests {
 				return // a later test owns the result shown
 			}
-			if a.connectionTarget() != target {
+			if a.connCore() != target {
 				a.RealTest = Latency{}
 				return
 			}

@@ -96,11 +96,11 @@ func (a *App) EnsureCore() {
 				a.InstallCore()
 				return
 			}
-			if newerVersion(bv, v) && (a.Conn == StateOff || a.WaitCore || a.tunOn && tunTooOld(v)) {
+			if newerVersion(bv, v) && (a.Conn == StateOff || a.WaitCore || a.planned.core().tun() && tunTooOld(v)) {
 				a.seedCore()
 				return
 			}
-			if a.WaitCore && a.State.Settings.TUN.Enabled && tunTooOld(v) {
+			if a.WaitCore && a.waitOpts.TUN.Enabled && tunTooOld(v) {
 				a.InstallCore()
 				return
 			}
@@ -108,11 +108,9 @@ func (a *App) EnsureCore() {
 				a.CoreLatest, a.latestBundled = bv, true
 			}
 			if a.seedGeo() {
-				return // which then connects, and starts the cores, as below
+				return // which then connects, and starts the core, as below
 			}
-			if a.WaitCore {
-				a.Connect(a.ActiveID, nil)
-			}
+			a.resumeConnect(change{})
 			a.SyncCores()
 			a.PinCertificates()
 		})
@@ -240,6 +238,9 @@ func (a *App) coreJob(msg, verb string, prepare func(client *http.Client) (strin
 		defer a.jobs.Done()
 		defer client.CloseIdleConnections()
 		src, err := prepare(client)
+		if err != nil {
+			_ = os.RemoveAll(a.downloadDir()) // a partial download; CoreBusy keeps other jobs out
+		}
 		a.Post(func() {
 			if err != nil {
 				a.coreDone(verb, false, "", err)
@@ -253,15 +254,15 @@ func (a *App) coreJob(msg, verb string, prepare func(client *http.Client) (strin
 // replaceCore replaces the core files with those in src, while every core goes on running: Windows lets a
 // running executable be moved aside, so the old processes keep their files and new ones start from the
 // new. Nothing new may start from the files meanwhile: tests running are waited for, the core operations
-// wait their turn. Then the cores are renewed beside the running ones (coreDone).
+// wait their turn. Then the cores restart from the new files (coreDone).
 func (a *App) replaceCore(verb, src string) {
 	a.CoreMsg = "正在替换 Xray 核心…"
 	dir, exe, readVersion, download := a.CoreDir(), a.coreExe(), a.ReadCoreVersion, a.downloadDir()
 	// The rule data installed stays (CopyCore): it is updated by itself, or by the installer's (seedGeo).
-	// Where there is none, the core's comes with it: the installer's, of a known release, or the
-	// official package's own.
-	geoTag := ""
-	if src == a.BundledCore && slices.ContainsFunc(xray.GeoFiles, func(f string) bool { return slices.Contains(xray.Missing(dir), f) }) {
+	// Where there is none, the core's comes with it: the installer's, of a known release, or the official
+	// package's own, of none, reduced to a few categories: the installer's then replaces it (coreDone).
+	geoTag, newGeo := "", slices.ContainsFunc(xray.GeoFiles, func(f string) bool { return slices.Contains(xray.Missing(dir), f) })
+	if newGeo {
 		geoTag = xray.ReadGeoTag(src)
 	}
 	a.replaceFiles(func() {
@@ -277,8 +278,8 @@ func (a *App) replaceCore(verb, src string) {
 			}
 		}
 		a.Post(func() {
-			if installed && geoTag != "" {
-				a.State.GeoTag = geoTag
+			if installed && newGeo {
+				a.State.GeoTag = geoTag // the release of the rule data now installed, "" for unknown
 				a.Save()
 			}
 			a.coreDone(verb, installed, v, err)
@@ -287,12 +288,14 @@ func (a *App) replaceCore(verb, src string) {
 }
 
 // replaceFiles is the shared commit barrier for executables and rule data. Downloads
-// are already staged elsewhere. Stop new tests, await existing workers, then commit
+// are already staged elsewhere. Stop new tests, end those running, await their workers, then commit
 // in core-operation order so no startup or API config load sees a partial file set.
 // replace runs on the core queue and posts completion to release coreHold.
 func (a *App) replaceFiles(replace func()) {
 	a.coreHold = true
 	a.StopSpeedTest()
+	a.stopLatencyTest()
+	a.stopPinning()
 	a.jobs.Add(1)
 	go func() {
 		defer a.jobs.Done()
@@ -303,9 +306,7 @@ func (a *App) replaceFiles(replace func()) {
 
 // coreDone ends a core job: installed tells whether the files were replaced, v is the version then
 // verified. A connection waiting for the core starts, on the old core if the new one could not be placed,
-// or ends with the reason when no core it can use is there; running cores move to a new backend core
-// beside the old one, which finishes its connections. The front core stays on the old core until it
-// restarts.
+// or ends with the reason when no core it can use is there; a core running restarts from the new files.
 func (a *App) coreDone(verb string, installed bool, v string, err error) {
 	a.CoreBusy, a.coreHold, a.CoreMsg = false, false, ""
 	defer a.SyncCores()
@@ -321,18 +322,21 @@ func (a *App) coreDone(verb string, installed bool, v string, err error) {
 		a.CoreLatest, a.latestBundled = "", false
 		a.QueueLog("[RayDock] 已安装 Xray " + cmp.Or(v, "核心"))
 	}
+	// The installer's rule data, where newer, comes first: the connection waiting starts with it, and the
+	// core running restarts once (geoDone).
+	seeding := a.seedGeo()
 	switch {
-	case a.WaitCore && !a.coreUsable(a.State.Settings.TUN.Enabled):
+	case a.WaitCore && !a.coreUsable(a.waitOpts.TUN.Enabled):
 		reason := a.CoreErr
 		if err == nil {
 			reason = "TUN 模式需要 Xray " + xray.MinTUNVersion + " 或更新的核心，当前可用的是 " + v
 		}
 		a.endConnection(reason)
+	case seeding:
 	case a.WaitCore:
-		a.Connect(a.ActiveID, nil)
-	case installed && err == nil && a.run != nil:
-		a.QueueLog("[RayDock] 改用新核心，已建立的连接不中断")
-		a.RenewCores()
+		a.resumeConnect(change{files: installed && err == nil})
+	case installed && err == nil && a.planned.core() != nil:
+		a.QueueLog("[RayDock] 改用新核心")
+		a.RenewCores(change{files: true})
 	}
-	a.seedGeo()
 }

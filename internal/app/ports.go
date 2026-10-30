@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"raydock/internal/node"
+	"raydock/internal/system"
 	"raydock/internal/xray"
 )
 
@@ -48,117 +49,91 @@ func (a *App) SetNodePort(id string, port int) error {
 	return nil
 }
 
-// SyncCores reconciles node, chain, port and network changes with the running pair.
-// In-flight starts restart only when their inputs changed; identical targets do nothing.
+// SyncCores restarts the core if its nodes, chains, dedicated ports or network changed, with the settings
+// it runs; a core serving them already, running or starting, goes on. Without a connection the dedicated
+// ports follow the settings at once.
 func (a *App) SyncCores() {
-	a.portBasis = portSettings{a.State.Settings.AllowLAN, a.State.Settings.Port}
+	s := a.State.Settings
+	a.portBasis = portSettings{s.AllowLAN, s.Port, s.LogLevel}
 	if a.closing {
 		return
 	}
 	switch {
 	case a.Conn == StateOff:
 		a.syncIdle(change{})
-	case a.WaitCore:
-	case a.run != nil && a.run.b.Connected():
-		a.connect(a.ActiveID, a.run.opts, nil, change{})
-	case a.run == nil && a.planned != nil && a.startStale(a.planned):
-		a.Connect(a.ActiveID, nil)
+	case !a.WaitCore && a.connPlan() != nil:
+		a.connect(a.ActiveID, a.connOpts(), nil, change{})
 	}
 }
 
-// startStale reports whether start t no longer starts the connection's chain and the dedicated ports.
-func (a *App) startStale(t *coreTarget) bool {
-	n := a.NodeByID(a.ActiveID)
-	if n == nil {
-		return true
-	}
-	chain, err := a.Chain(n)
-	if err != nil {
-		return true
-	}
-	b, err := a.backendFor(chain, t.run.opts)
-	return err != nil || !sameJSON(b.Chain, t.run.b.Chain) || !sameJSON(b.Ports, t.run.b.Ports)
-}
-
-func (a *App) idleOptions() xray.Options {
-	o := a.xrayOptions()
-	o.TUN.Enabled = false
-	return o
-}
-
-// syncIdle serves dedicated ports without a connection. New cores wait for file installation;
-// existing dedicated routes keep running while the files are replaced. UI thread only.
+// syncIdle serves the dedicated ports without a connection: the core restarts serving them alone, or
+// stops. While the core files are checked or replaced nothing new starts: a core serving the ports alone
+// goes on. UI thread only.
 func (a *App) syncIdle(ch change) {
-	routes := a.portRoutes()
-	if len(routes) == 0 || a.closing {
-		if a.planned != nil {
-			a.stopPair()
-		}
+	if a.closing {
 		return
 	}
+	cur := a.planned.core()
+	var t *coreTarget
 	if a.coreHold || !a.CoreReady() {
-		if t := a.planned; t != nil && t.run.b.Connected() {
-			a.stopPair()
+		t = &coreTarget{}
+		if cur != nil && !cur.exited && cur.run.Chain == nil {
+			t = a.planned
 		}
-		return
-	}
-	if a.run != nil && a.frontRun != nil && a.apply(nil, nil, a.idleOptions(), nil, ch) {
-		return
-	}
-	if t := a.planned; t != nil && a.run == nil && !t.run.b.Connected() && sameJSON(t.run.b.Ports, routes) {
-		return // starting them already
-	}
-	b, err := a.backendFor(nil, a.idleOptions())
-	if err != nil {
-		a.markPorts(err.Error())
-		return
-	}
-	run, err := newBackend(a.idleOptions(), b)
-	if err != nil {
-		a.markPorts(err.Error())
-		return
-	}
-	front, err := a.newFront(run)
-	if err != nil {
-		a.markPorts(err.Error())
-		return
-	}
-	t := &coreTarget{run: run, front: front, served: a.describePorts(routes), drain: true}
-	a.startPair(t, func(err error) {
-		if err != nil {
-			a.QueueLog("[RayDock] 专用端口启动失败：" + err.Error())
-			a.markPorts("启动失败，详见日志")
+	} else {
+		var err error
+		if t, err = a.planTarget(coreSpec{opts: a.xrayOptions()}, ch); err != nil {
+			a.markPorts(err.Error())
+			t.proc = nil
 		}
-	})
+	}
+	if t == a.planned || t.proc == cur && (a.planned == nil || a.planned.id == "") {
+		return
+	}
+	a.startCore(t, func(error) {})
 }
 
-// holdPorts reserves planned front-core ports so portTaken recognizes them as ours.
+// holdPorts reserves the dedicated ports of t's core so portTaken recognizes them as ours.
 func (a *App) holdPorts(t *coreTarget) {
-	if t == nil {
+	r := t.core()
+	if r == nil || r.exited {
 		return
 	}
-	if a.frontPorts == nil {
-		a.frontPorts = map[int]bool{}
+	if a.ownPorts == nil {
+		a.ownPorts = map[int]bool{}
 	}
-	for _, r := range t.front.f.Backend.Ports {
-		a.frontPorts[r.Port] = true
+	for _, p := range r.run.Ports {
+		a.ownPorts[p.Port] = true
 	}
 }
 
 // heldPorts combines live and planned port ownership.
 func (a *App) heldPorts(live *coreTarget) {
-	clear(a.frontPorts)
+	clear(a.ownPorts)
 	a.holdPorts(live)
 	a.holdPorts(a.planned)
 }
 
-// portTaken excludes foreign listeners so one occupied port cannot break the whole pair.
-func (a *App) portTaken(port int) bool {
-	if a.frontPorts[port] {
-		return false
+// portTaken excludes foreign listeners so one occupied port cannot fail the whole core.
+func (a *App) portTaken(port int, lan ...bool) bool {
+	if a.ownPorts[port] {
+		if r := a.live.Load(); r != nil && !r.exited && r.core != nil && r.core.Running() {
+			owned, err := system.ListenerOwned(r.core.PID(), port)
+			if err != nil {
+				a.QueueLog("[RayDock] 无法确认端口所有者：" + err.Error())
+				return true
+			}
+			if owned {
+				return false
+			}
+		}
 	}
 	host := "127.0.0.1"
-	if a.State.Settings.AllowLAN {
+	allow := a.State.Settings.AllowLAN
+	if len(lan) > 0 {
+		allow = lan[0]
+	}
+	if allow {
 		host = "0.0.0.0"
 	}
 	l, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
@@ -169,18 +144,23 @@ func (a *App) portTaken(port int) bool {
 	return false
 }
 
-func (a *App) notePorts(t *coreTarget) {
-	if t.served == a.servedPorts {
-		return
+// portRoutes returns the dedicated ports that can run beside the local port local, and records in PortErrs
+// why the others cannot.
+func (a *App) portRoutes(local int, lan ...bool) []xray.PortRoute {
+	allow := a.State.Settings.AllowLAN
+	if len(lan) > 0 {
+		allow = lan[0]
 	}
-	a.servedPorts = t.served
-	if t.served != "" {
-		a.QueueLog("[RayDock] 专用端口：" + t.served)
+	// A validation/reservation cannot outlive its configured port.
+	for port := range a.portChecks {
+		used := false
+		for _, p := range a.State.Ports {
+			used = used || p == port
+		}
+		if !used {
+			delete(a.portChecks, port)
+		}
 	}
-}
-
-// portRoutes returns the dedicated ports that can run and records in PortErrs why the others cannot.
-func (a *App) portRoutes() []xray.PortRoute {
 	// Ports of nodes gone with a subscription update are released.
 	released := false
 	for id := range a.State.Ports {
@@ -197,18 +177,21 @@ func (a *App) portRoutes() []xray.PortRoute {
 	ids := slices.SortedFunc(maps.Keys(a.State.Ports), func(x, y string) int { return a.State.Ports[x] - a.State.Ports[y] })
 	for _, id := range ids {
 		port := a.State.Ports[id]
-		if port == a.State.Settings.Port || (a.Conn != StateOff && port == a.runningPort) {
+		if port == local {
 			a.PortErrs[id] = "与本地代理端口冲突"
 			continue
 		}
-		if a.portTaken(port) {
+		if a.portTaken(port, allow) {
 			a.PortErrs[id] = "端口已被其他程序占用"
 			continue
 		}
 		chain, err := a.Chain(a.NodeByID(id))
 		if err == nil {
-			// Check the route alone, so one broken node does not take the other ports or the connection down.
-			_, err = xray.BuildBackend(xray.Options{}, xray.Backend{Mixed: 1, Ports: []xray.PortRoute{{Port: port, Chain: chain}}})
+			check, buildErr := a.portCheckFor(xray.PortRoute{Port: port, Chain: chain}, allow)
+			err = buildErr
+			if cached, ok := a.portChecks[port]; err == nil && ok && cached.key == check.key && cached.err != "" {
+				err = errors.New(cached.err)
+			}
 		}
 		if err != nil {
 			a.PortErrs[id] = err.Error()

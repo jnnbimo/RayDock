@@ -40,3 +40,10 @@ func TaskHelper([]string) (int, bool) { return 0, false }
 func Autostart(string) StartMode { return StartOff }
 
 func SetAutostart(StartMode, string) error { return errors.New("当前平台暂不支持开机自启") }
+
+// AdminAutostartRisk finds no risk where there is no start at logon.
+func AdminAutostartRisk(string) error { return nil }
+
+const UninstallArg = "--uninstall-autostart"
+
+func CleanupAutostart(string) error { return nil }

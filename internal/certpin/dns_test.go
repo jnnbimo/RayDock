@@ -3,13 +3,15 @@ package certpin
 import (
 	"context"
 	"crypto/tls"
-	"golang.org/x/net/dns/dnsmessage"
 	"net"
 	"net/netip"
-	"raydock/internal/localnet"
-	"raydock/internal/node"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
+
+	"raydock/internal/localnet"
+	"raydock/internal/node"
 )
 
 func testResolver(t *testing.T, ips ...string) *net.Resolver {

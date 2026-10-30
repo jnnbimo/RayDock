@@ -13,6 +13,14 @@ import (
 	"raydock/internal/node"
 )
 
+type pinBatch struct{ cancel context.CancelFunc }
+
+func (a *App) stopPinning() {
+	for j := range a.pinJobs {
+		j.cancel()
+	}
+}
+
 // PinCertificates fetches certificates for the requested nodes (all with no ids). File replacement
 // waits for these workers; work deferred during replacement is reconsidered when the core is ready.
 func (a *App) PinCertificates(ids ...string) {
@@ -31,16 +39,31 @@ func (a *App) PinCertificates(ids ...string) {
 		return
 	}
 	fetch, strategy := a.CertPin, a.State.Settings.DNSStrategy
+	ctx, cancel := context.WithCancel(a.workCtx)
+	batch := &pinBatch{cancel: cancel}
+	a.pinJobs[batch] = true
 	a.tests.Add(1)
 	go func() {
 		defer a.tests.Done()
-		pins, errs := a.fetchPins(todo, fetch, strategy)
-		a.Post(func() { a.pinned(todo, pins, errs) })
+		pins, errs := a.fetchPins(ctx, todo, fetch, strategy)
+		a.Post(func() {
+			delete(a.pinJobs, batch)
+			cancelled := ctx.Err() != nil
+			cancel()
+			if cancelled {
+				for _, n := range todo {
+					delete(a.pinning, n.ID)
+				}
+				a.PinCertificates()
+				return
+			}
+			a.pinned(todo, pins, errs)
+		})
 	}()
 }
 
 // Default batches serialize ownership of the dedicated resolver core; latency tests own another core.
-func (a *App) fetchPins(todo []node.Node, fetch func(context.Context, *node.Node) (string, error), strategy string) ([]string, []error) {
+func (a *App) fetchPins(ctx context.Context, todo []node.Node, fetch func(context.Context, *node.Node) (string, error), strategy string) ([]string, []error) {
 	pins, errs := make([]string, len(todo)), make([]error, len(todo))
 	if fetch == nil {
 		a.pinMu.Lock()
@@ -48,10 +71,10 @@ func (a *App) fetchPins(todo []node.Node, fetch func(context.Context, *node.Node
 		var resolver *net.Resolver
 		iface, err := localnet.Find()
 		if err == nil {
-			err = a.workCtx.Err()
+			err = ctx.Err()
 		}
 		if err == nil {
-			resolver, err = localResolver(a.coreExe(), filepath.Join(a.DataDir, "pin-resolver.json"), a.pinCore, iface, strategy)
+			resolver, err = localResolver(ctx, a.coreExe(), filepath.Join(a.DataDir, "pin-resolver.json"), a.pinCore, iface, strategy)
 		}
 		defer a.pinCore.Stop()
 		if err != nil {
@@ -68,12 +91,12 @@ func (a *App) fetchPins(todo []node.Node, fetch func(context.Context, *node.Node
 		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
-			case <-a.workCtx.Done():
-				errs[i] = a.workCtx.Err()
+			case <-ctx.Done():
+				errs[i] = ctx.Err()
 				return
 			}
 			defer func() { <-sem }()
-			ctx, cancel := context.WithTimeout(a.workCtx, 8*time.Second)
+			ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
 			pins[i], errs[i] = fetch(ctx, &todo[i])
 		})
@@ -111,5 +134,5 @@ func (a *App) pinned(nodes []node.Node, pins []string, errs []error) {
 		return
 	}
 	a.Save()
-	a.SyncCores() // the cores take the pin if the connection or a dedicated port uses the node
+	a.SyncCores() // the core takes the pin if the connection or a dedicated port uses the node
 }

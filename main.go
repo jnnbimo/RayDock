@@ -29,6 +29,7 @@ type osAutostart struct{ exe string }
 
 func (o osAutostart) Get() system.StartMode        { return system.Autostart(o.exe) }
 func (o osAutostart) Set(m system.StartMode) error { return system.SetAutostart(m, o.exe) }
+func (o osAutostart) AdminRisk() error             { return system.AdminAutostartRisk(o.exe) }
 
 type winProxy struct{}
 
@@ -55,7 +56,44 @@ func parseArgs(args []string) launchArgs {
 	return l
 }
 
+const prepareUninstallArg = "--prepare-uninstall"
+
+// prepareUninstall acquires the application lock only after the running instance completed Shutdown.
+// Errors propagate to NSIS before it deletes any installation files or registration metadata.
+func prepareUninstall() error {
+	deadline := time.Now().Add(35 * time.Second)
+	for !mygo.App.RequestSingleInstanceLock() {
+		if time.Now().After(deadline) {
+			return errors.New("RayDock 未能正常退出，卸载已停止；请退出后重试")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	dataDir, err := mygo.App.Path(mygo.PathUserData)
+	if err != nil {
+		return err
+	}
+	if err = app.RestoreProxyBackup(dataDir, winProxy{}); err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return system.CleanupAutostart(exe)
+}
+
 func main() {
+	if slices.Contains(os.Args[1:], prepareUninstallArg) || slices.Contains(os.Args[1:], system.UninstallArg) {
+		if err := prepareUninstall(); err != nil {
+			log.Print(err)
+			if dir, e := mygo.App.Path(mygo.PathUserData); e == nil {
+				_ = os.MkdirAll(dir, 0700)
+				_ = os.WriteFile(filepath.Join(dir, "uninstall-error.txt"), []byte(err.Error()+"\n"), 0600)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	// Relaunched through UAC only to change the logon task: no window, no single-instance lock.
 	if code, ok := system.TaskHelper(os.Args[1:]); ok {
 		os.Exit(code)
@@ -132,7 +170,7 @@ func main() {
 		a.CleanStaleProxy()
 		var tray *mygo.Tray
 		quitting := false
-		mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { quitting = true })
+		mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { quitting = true; a.Shutdown() })
 		// Each window has a view of its own: widget state such as a list's belongs to the window that
 		// built it, while the app's state lives in a.
 		open := func(hidden bool) *mygo.Window {
@@ -204,6 +242,10 @@ func main() {
 			w.Focus()
 		}
 		mygo.App.OnSecondInstance(func(argv []string, _ string) {
+			if slices.Contains(argv, prepareUninstallArg) || slices.Contains(argv, system.UninstallArg) {
+				mygo.App.Quit()
+				return
+			}
 			if !slices.Contains(argv, system.AutostartArg) {
 				show()
 			}

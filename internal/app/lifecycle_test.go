@@ -18,8 +18,8 @@ import (
 	"raydock/internal/xray"
 )
 
-// A plan is not a serving connection. Check both consumers of the committed
-// target, including a routing-only change that reuses the backend process.
+// A plan is not a serving connection: checks wait for the core of the plan to run, after a restart of
+// the same node's core (another routing mode) as after another node.
 func TestConnectionChecksWaitForCommit(t *testing.T) {
 	for _, routing := range []bool{false, true} {
 		t.Run(fmt.Sprint("routing=", routing), func(t *testing.T) {
@@ -34,7 +34,7 @@ func TestConnectionChecksWaitForCommit(t *testing.T) {
 			a.ImportLinks("socks://127.0.0.1:9#old\nsocks://127.0.0.1:10#new", "")
 			release := runningFake(t, a, a.State.Nodes[0].ID)
 			defer release()
-			a.live.Store(a.planned)
+			liveFake(a, a.planned)
 			a.TestReal()
 			waitRegression(t, posts, func() bool { return !a.RealTest.Testing })
 			if a.RealTest.Err == "" || hits.Load() != 1 {
@@ -46,7 +46,7 @@ func TestConnectionChecksWaitForCommit(t *testing.T) {
 				a.Connect(a.State.Nodes[1].ID, nil)
 			}
 			target := a.planned
-			if a.connectionTarget() != nil || a.Checkable() || a.OverviewCurrent() {
+			if a.connCore() != nil || a.Checkable() || a.OverviewCurrent() {
 				t.Fatal("pending plan was published as a serving connection")
 			}
 			a.TestReal()
@@ -54,10 +54,9 @@ func TestConnectionChecksWaitForCommit(t *testing.T) {
 			if a.RealTest.Testing || a.Overview.Testing() || hits.Load() != 1 {
 				t.Fatal("checks were started against the old listener under a new plan")
 			}
-			// Model the physical commit; the queue stays gated so no fake process runs.
-			a.live.Store(target)
-			a.applied(target)
-			if a.RealTest != (Latency{}) || a.connectionTarget() != target || !a.Checkable() {
+			// Model the start; the queue stays gated so no process runs.
+			commitFake(a, target)
+			if a.RealTest != (Latency{}) || a.connCore() != target.core() || !a.Checkable() {
 				t.Fatal("the old listener's result survived the switch")
 			}
 			a.TestReal()
@@ -69,104 +68,87 @@ func TestConnectionChecksWaitForCommit(t *testing.T) {
 	}
 }
 
-func TestAppliedResultCannotPublishOlderTarget(t *testing.T) {
+// A start replaced by a later one before its turn publishes nothing: neither its port nor a route.
+func TestReplacedStartCannotPublish(t *testing.T) {
 	a, _, _ := newRegressionApp(t)
 	connectedFake(t, a)
-	old := a.live.Load()
-	next := *old
-	run := *old.run
-	run.opts.Port, _ = freePort()
-	front := *old.front
-	var err error
-	front.cfg, err = xray.BuildFront(run.opts, front.f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	next.run, next.front = &run, &front
-	next.reroute = true // another local port: apply plans it so
-	a.run, a.frontRun, a.planned = next.run, next.front, &next
-	a.live.Store(&next)
 	port, since, key := a.runningPort, a.Since, a.OverviewKey()
-	a.applied(old)
-	if a.runningPort != port || a.OverviewKey() != key {
-		t.Fatal("an older UI completion published a listener that no longer serves")
+	a.State.Settings.Port, _ = freePort()
+	a.Reconnect() // another local port
+	first := a.planned
+	a.SetMode(xray.ModeGlobal) // replaces it
+	next := a.planned
+	a.started(first, nil)
+	if a.Conn != StateConnecting || a.runningPort != port || a.OverviewKey() != key {
+		t.Fatal("a start replaced published a listener that does not serve")
 	}
-	a.applied(&next)
-	if a.runningPort != run.opts.Port || a.OverviewKey() == key {
-		t.Fatal("the actual committed listener was not published")
+	commitFake(a, next)
+	if a.Conn != StateOn || a.runningPort != a.State.Settings.Port || a.OverviewKey() == key {
+		t.Fatal("the core started was not published")
 	}
 	if a.Since != since {
 		t.Fatal("the same node stays connected since it connected")
 	}
 }
 
-// The connected time counts from connecting to the node: a change made beside the running cores (a
-// dedicated port, a setting) keeps it, another node starts it again.
+// The connected time counts from connecting to the node: a restart of its core for a change (a dedicated
+// port, a setting) keeps it, another node starts it again. Either restart has the home page check again.
 func TestConnectedSinceTheNode(t *testing.T) {
 	a, _, _ := newRegressionApp(t)
 	connectedFake(t, a)
+	a.ImportLinks("trojan://p@127.0.0.1:2#other", "")
 	since, key := a.Since, a.OverviewKey()
-	ports := *a.live.Load()
-	a.live.Store(&ports)
-	a.applied(&ports)
-	if a.Since != since || a.OverviewKey() != key {
-		t.Fatal("a dedicated port changed the connection's time or route")
+	a.RenewCores(change{geo: true})
+	commitFake(a, a.planned)
+	if a.Since != since || a.OverviewKey() == key {
+		t.Fatal("a restart changed the connection's time, or kept its check")
 	}
 	time.Sleep(time.Millisecond)
-	switched := *a.live.Load()
-	switched.switched, switched.reroute = true, true
-	a.live.Store(&switched)
-	a.applied(&switched)
-	if !a.Since.After(since) || a.OverviewKey() == key {
-		t.Fatal("another node should start the connected time and the route again")
+	a.Connect(a.State.Nodes[1].ID, nil)
+	commitFake(a, a.planned)
+	if !a.Since.After(since) {
+		t.Fatal("another node should start the connected time again")
 	}
 }
 
-// A check whose route changed while it ran is dropped, and the page checks again; one across a change of
-// a dedicated port alone stands: the route is the same.
-func TestOverviewDropsResultsAcrossCommit(t *testing.T) {
-	for _, reroute := range []bool{true, false} {
-		t.Run(fmt.Sprint("reroute=", reroute), func(t *testing.T) {
-			a, posts, _ := newRegressionApp(t)
-			oldURL, oldServices := probe.IPInfoURL, probe.Services
-			t.Cleanup(func() { probe.IPInfoURL, probe.Services = oldURL, oldServices })
-			probe.IPInfoURL, probe.Services = "http://ip.example/info", nil
-			entered, release := make(chan struct{}, 1), make(chan struct{})
-			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				entered <- struct{}{}
-				<-release
-				w.Write([]byte(`{"ip":"203.0.113.1","fraudScore":12}`))
-			}))
-			defer proxy.Close()
-			defer close(release)
-			connectedFake(t, a)
-			a.run.opts.Port = proxy.Listener.Addr().(*net.TCPAddr).Port
-			a.CheckOverview(false)
-			select {
-			case <-entered:
-			case <-time.After(time.Second):
-				t.Fatal("overview did not start")
-			}
-			oldKey := a.Overview.Key
-			next := *a.live.Load()
-			next.reroute = reroute
-			a.live.Store(&next) // a fresh committed configuration, with the same node and process
-			a.applied(&next)
-			if a.OverviewCurrent() == reroute || (oldKey == a.OverviewKey()) == reroute {
-				t.Fatal("overview did not follow the committed route")
-			}
-			// End the request and consume its completion, without starting another check.
-			release <- struct{}{}
-			select {
-			case post := <-posts:
-				post()
-			case <-time.After(time.Second):
-				t.Fatal("overview did not finish")
-			}
-			if (a.Overview.IP.IP != "") == reroute {
-				t.Fatalf("result %q across a commit, reroute %v", a.Overview.IP.IP, reroute)
-			}
-		})
+// A check through a core that restarted while it ran is dropped, and the page checks again.
+func TestOverviewDropsResultsAcrossRestart(t *testing.T) {
+	a, posts, _ := newRegressionApp(t)
+	oldURL, oldServices := probe.IPInfoURL, probe.Services
+	t.Cleanup(func() { probe.IPInfoURL, probe.Services = oldURL, oldServices })
+	probe.IPInfoURL, probe.Services = "http://ip.example/info", nil
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		<-release
+		w.Write([]byte(`{"ip":"203.0.113.1","fraudScore":12}`))
+	}))
+	defer proxy.Close()
+	defer close(release)
+	connectedFake(t, a)
+	a.running.core().opts.Port = proxy.Listener.Addr().(*net.TCPAddr).Port
+	a.CheckOverview(false)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("overview did not start")
+	}
+	oldKey := a.Overview.Key
+	a.RenewCores(change{geo: true})
+	commitFake(a, a.planned)
+	if a.OverviewCurrent() || oldKey == a.OverviewKey() {
+		t.Fatal("overview did not follow the restart")
+	}
+	// End the request and consume its completion, without starting another check.
+	release <- struct{}{}
+	select {
+	case post := <-posts:
+		post()
+	case <-time.After(time.Second):
+		t.Fatal("overview did not finish")
+	}
+	if a.Overview.IP.IP != "" {
+		t.Fatalf("result %q across a restart", a.Overview.IP.IP)
 	}
 }
 
@@ -196,7 +178,8 @@ func TestTrafficSettlesRetiredCores(t *testing.T) {
 			a, posts, _ := newRegressionApp(t)
 			var down atomic.Int64
 			c := &xray.Core{}
-			a.procs.add(c, statsAPI(t, down.Load))
+			port, client := statsAPI(t, down.Load)
+			a.procs.add(c, port, client)
 			down.Store(500)
 			a.StartTraffic()
 			a.StartTraffic() // must not create a second sampler
@@ -220,7 +203,8 @@ func TestShutdownSavesQueuedAndFinalTraffic(t *testing.T) {
 	a, _, _ := newRegressionApp(t)
 	var down atomic.Int64
 	c := &xray.Core{}
-	a.procs.add(c, statsAPI(t, down.Load))
+	port, client := statsAPI(t, down.Load)
+	a.procs.add(c, port, client)
 	down.Store(500)
 	a.procs.sampleTraffic(a.workCtx) // intentionally not yet delivered to the UI
 	down.Store(800)

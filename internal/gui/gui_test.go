@@ -3,16 +3,17 @@ package gui
 import (
 	"errors"
 	"fmt"
-	"raydock/internal/app"
-	"raydock/internal/app/apptest"
-	"raydock/internal/store"
-	"raydock/internal/system"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/egoist/mygo/ui"
+
+	"raydock/internal/app"
+	"raydock/internal/app/apptest"
+	"raydock/internal/store"
+	"raydock/internal/system"
 )
 
 // nodesView is the main window shown on the nodes page, which most tests work on.

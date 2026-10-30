@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -21,17 +20,36 @@ func (a *App) xrayOptions() xray.Options {
 }
 
 // Connect connects to node id, downloading the core first if needed and asking for elevation when TUN lacks
-// rights. While connected, or while the cores serve the dedicated ports, the change is applied beside the
-// running cores (apply): programs keep the local port, the TUN and the dedicated ports; another node ends
-// the connections through the old one. The TUN alone restarts the cores. Switching to another node keeps
-// the settings that run: those changed since stay pending (SettingsDirty) until reconnecting, which
-// applies them.
+// rights. While connected, the core restarts with the change, ending the connections it carried (see
+// cores.go). Switching to another node keeps the settings that run: those changed since stay
+// pending (SettingsDirty) until reconnecting, which applies them.
 func (a *App) Connect(id string, toast func(string)) {
 	opts := a.xrayOptions()
-	if r := a.run; r != nil && a.Conn == StateOn && id != a.ActiveID {
-		opts = r.opts
+	if a.connPlan() != nil && id != a.ActiveID {
+		opts = a.connOpts()
 	}
 	a.connect(id, opts, toast, change{})
+}
+
+// connPlan returns the plan of the connection, running or starting; nil without one. While a change
+// waits for the core files (WaitCore), it is the plan before, still running.
+func (a *App) connPlan() *coreTarget {
+	if t := a.planned; t != nil && t.id != "" && a.Conn != StateOff {
+		return t
+	}
+	return nil
+}
+
+// connOpts returns the settings the connection is planned with: those of a change waiting for the core
+// files, else those running or starting.
+func (a *App) connOpts() xray.Options {
+	if a.WaitCore {
+		return a.waitOpts
+	}
+	if t := a.connPlan(); t != nil {
+		return t.opts
+	}
+	return a.xrayOptions()
 }
 
 // connect is Connect with opts. Changes that apply one part of the settings alone (SetMode, SyncCores)
@@ -60,42 +78,44 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 	for _, c := range chain {
 		a.PinCertificates(c.ID)
 	}
-	// Beside the running cores: those of the connection, or of the dedicated ports once the core is ready.
-	if r := a.run; r != nil && a.frontRun != nil {
-		connected := r.b.Connected()
-		if (connected && a.Conn != StateOff || !connected && !a.coreHold && a.coreUsable(opts.TUN.Enabled)) &&
-			a.apply(n, chain, opts, toast, ch) {
-			return
-		}
-	}
-	b, err := a.backendFor(chain, opts)
+	local, err := a.tunLocal(opts)
 	if err != nil {
 		a.ConnErr = err.Error()
 		return
 	}
-	run, err := newBackend(opts, b)
+	prev := a.connPlan()
+	t, err := a.planTarget(coreSpec{opts: opts, run: xray.Run{Chain: copyChain(chain), Local: local}}, ch)
 	if err != nil {
 		a.ConnErr = err.Error()
 		return
 	}
-	front, err := a.newFront(run)
-	if err != nil {
-		a.ConnErr = err.Error()
+	t.id, t.opts = n.ID, opts
+	if prev != nil && prev.id == n.ID && t.proc == prev.proc && !a.WaitCore {
+		a.ConnErr, a.SettingsDirty = "", a.pending() // the connection goes on as planned
 		return
 	}
+	// A change of the connection keeps it: connected since it started, unless it moves to another node.
+	// Changes made while one is carried out add up.
+	if a.Conn != StateConnecting {
+		a.connFresh = a.Conn == StateOff
+		a.connSwitched = a.connFresh
+	}
+	a.connSwitched = a.connSwitched || n.ID != a.ActiveID
+	t.fresh, t.switched = a.connFresh, a.connSwitched
 	a.warnChain(chain, toast)
 	a.cancelConnect()
 	ctx, cancel := context.WithCancel(a.workCtx)
 	a.connCtx, a.connCancel = ctx, cancel
-	seq := a.connSeq
+	t.connSeq = a.connSeq
 	a.Conn, a.ActiveID, a.ConnErr, a.SettingsDirty = StateConnecting, n.ID, "", false
 	a.RealTest = Latency{}
 	a.State.SelectedID, a.State.LastID = n.ID, n.ID
 	a.Save()
 	a.changed()
 	if a.coreHold || !a.coreUsable(opts.TUN.Enabled) {
-		// The core files are being checked or replaced, missing or too old: connect once that is done.
-		a.WaitCore = true
+		// The core files are being checked or replaced, missing or too old: the change is made once that is
+		// done (resumeConnect), with these settings. The core running meanwhile goes on.
+		a.WaitCore, a.waitOpts = true, opts
 		switch {
 		case a.CoreBusy || a.coreHold:
 			a.QueueLog("[RayDock] Xray 核心文件正在准备，完成后自动连接")
@@ -108,25 +128,55 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 		return
 	}
 	a.WaitCore = false
-	a.logConnect(n, chain, opts)
+	const cut = "，重新启动核心，已建立的连接会断开"
+	switch cur := prev.core(); {
+	case t.fresh || cur == nil:
+		a.logConnect(n, chain, opts)
+	case t.switched && n.ID != prev.id:
+		a.QueueLog("[RayDock] 切换到 " + n.Label() + "（" + n.Address() + "）" + cut)
+		if len(chain) > 1 {
+			a.QueueLog("[RayDock] 代理链：" + chainLabel(chain))
+		}
+	case prev.id == n.ID && !sameJSON(cur.run.Chain, t.proc.run.Chain):
+		a.QueueLog("[RayDock] " + n.Label() + "（" + n.Address() + "）的配置已更新" + cut)
+	case !sameJSON(cur.run.Ports, t.proc.run.Ports):
+		a.QueueLog("[RayDock] 专用端口已变更" + cut)
+	default:
+		a.QueueLog("[RayDock] 应用变更" + cut)
+	}
 	if opts.TUN.Enabled {
 		go a.watchLocalNet(ctx)
 	}
-	t := &coreTarget{connSeq: seq, id: n.ID, run: run, front: front, served: a.describePorts(run.b.Ports), drain: true}
-	a.startPair(t, func(err error) {
-		if seq != a.connSeq {
-			return
-		}
-		if err != nil {
-			a.endConnection(err.Error())
-			return
-		}
-		a.Conn, a.Since, a.runningPort = StateOn, time.Now(), opts.Port
-		a.SettingsDirty = a.pending() // changed while it started
-		a.SyncProxy()
-		a.changed()
-		a.SyncCores() // nodes or dedicated ports changed while it started
-	})
+	a.startCore(t, func(err error) { a.started(t, err) })
+}
+
+// resumeConnect makes the change of the connection that waited for the core files (WaitCore), with the
+// settings it was asked with; ch renews the core if it reads files replaced meanwhile.
+func (a *App) resumeConnect(ch change) {
+	if a.WaitCore {
+		a.connect(a.ActiveID, a.waitOpts, nil, ch)
+	}
+}
+
+// started ends the start of the connection's core t, unless another plan replaced it: connected, or the
+// connection ends with err.
+func (a *App) started(t *coreTarget, err error) {
+	if t.connSeq != a.connSeq {
+		return
+	}
+	if err != nil {
+		a.endConnection(err.Error())
+		return
+	}
+	a.Conn, a.runningPort = StateOn, t.opts.Port
+	if t.switched {
+		a.Since = time.Now()
+	}
+	a.routeGen++                  // what the home page checked went through the core before
+	a.SettingsDirty = a.pending() // changed while it started
+	a.SyncProxy()
+	a.changed()
+	a.SyncCores() // nodes or dedicated ports changed while it started
 }
 
 // warnChain tells about node settings the core cannot honor.
@@ -143,13 +193,14 @@ func (a *App) warnChain(chain []*node.Node, toast func(string)) {
 	}
 }
 
-// watchLocalNet follows the physical network while the TUN connection of ctx lasts. The front core
-// follows it by itself; the backend core stays bound to the interface found when it started, so when
-// another one takes over (Wi-Fi to Ethernet), the DNS servers change, or a network appears where there
-// was none, it is replaced beside the running one (SyncCores).
+// watchLocalNet follows the physical network while the TUN connection of ctx lasts. The core's outbounds
+// stay bound to the interface found when it started, so when another one takes over (Wi-Fi to Ethernet),
+// or its DNS servers change, it restarts (SyncCores). A change must last to the next look: one network
+// flickering does not restart it each time.
 func (a *App) watchLocalNet(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	var seen *xray.Local // a change seen once; UI thread only
 	for {
 		select {
 		case <-ctx.Done():
@@ -161,17 +212,27 @@ func (a *App) watchLocalNet(ctx context.Context) {
 			continue
 		}
 		a.Post(func() {
-			r := a.run
-			if ctx.Err() != nil || a.Conn != StateOn || r == nil || !r.b.Connected() {
+			r := a.running.core()
+			if ctx.Err() != nil || a.Conn != StateOn || r == nil || r.run.Local == nil {
 				return
 			}
-			cur := r.b.Local
-			if l := localXray(iface, r.opts.DNSStrategy); cur == nil || l.Interface != cur.Interface || !slices.Equal(l.DNS, cur.DNS) {
+			l := localXray(iface, r.opts.DNSStrategy)
+			switch {
+			case sameLocal(l, *r.run.Local):
+				seen = nil
+			case seen == nil || !sameLocal(l, *seen):
+				seen = &l
+			default:
+				seen = nil
 				a.QueueLog("[RayDock] 本地网络已变化（" + l.Interface + "），改经新网络连接")
 				a.SyncCores()
 			}
 		})
 	}
+}
+
+func sameLocal(x, y xray.Local) bool {
+	return x.Interface == y.Interface && x.Strategy == y.Strategy && slices.Equal(x.DNS, y.DNS)
 }
 
 // cancelConnect invalidates queued starts before they can create a process. UI only.
@@ -196,11 +257,10 @@ func (a *App) Disconnect() {
 }
 
 // endConnection ends the connection, for reason ("" when disconnected): every way one ends goes here. The
-// system proxy is restored first, so that programs go direct rather than to a closing port; then the cores
-// stop, or go on serving the dedicated ports alone (syncIdle), what the connection carried ended.
+// system proxy is restored first, so that programs go direct rather than to a closing port; then the core
+// restarts serving the dedicated ports alone, or stops (syncIdle).
 func (a *App) endConnection(reason string) {
 	a.cancelConnect()
-	a.resetDrains()
 	a.Conn, a.ActiveID, a.ConnErr, a.WaitCore, a.runningPort = StateOff, "", reason, false, 0
 	a.RealTest, a.SettingsDirty = Latency{}, false
 	a.restoreProxy()
@@ -236,28 +296,22 @@ func (a *App) ConnectTarget() string {
 	return ""
 }
 
-// Reconnect applies pending settings; only TUN changes require restarting both cores.
+// Reconnect applies pending settings, restarting the core if they change its config.
 func (a *App) Reconnect() {
 	if a.Conn != StateOff && a.ActiveID != "" {
 		a.Connect(a.ActiveID, nil)
 	}
 }
 
-// Restart restarts the cores of the connection: when a change could not be applied beside them.
-func (a *App) Restart() {
-	a.run, a.frontRun, a.planned = nil, nil, nil
-	a.Reconnect()
-}
-
-// RenewCores replaces the backend to load new core files or rule data.
-func (a *App) RenewCores() {
-	switch r := a.run; {
+// RenewCores restarts the core if it reads the files ch tells of: new core files, or new rule data.
+func (a *App) RenewCores(ch change) {
+	switch {
 	case a.Conn == StateOff:
-		a.syncIdle(change{renew: true})
-	case r != nil && r.b.Connected():
-		a.connect(a.ActiveID, r.opts, nil, change{renew: true})
-	default:
-		a.Reconnect()
+		a.syncIdle(ch)
+	case a.WaitCore:
+		a.resumeConnect(ch)
+	case a.connPlan() != nil:
+		a.connect(a.ActiveID, a.connOpts(), nil, ch)
 	}
 }
 
@@ -265,8 +319,8 @@ func (a *App) RenewCores() {
 func (a *App) SetMode(mode string) {
 	a.State.Settings.Mode = mode
 	a.Save()
-	if r := a.run; r != nil && a.Conn == StateOn {
-		opts := r.opts
+	if a.connPlan() != nil {
+		opts := a.connOpts()
 		opts.Mode = mode
 		a.connect(a.ActiveID, opts, nil, change{})
 		return
@@ -274,44 +328,42 @@ func (a *App) SetMode(mode string) {
 	a.Reconnect()
 }
 
-// pending compares settings with committed core configs; an in-flight start counts as pending.
+// pending compares the settings with those of the connection's core (e.g. a TUN option without TUN
+// changes nothing); a start in flight counts as pending.
 func (a *App) pending() bool {
 	if a.Conn == StateOff {
 		return false
 	}
-	r, f := a.run, a.frontRun
-	if r == nil || f == nil {
+	r := a.running.core()
+	if r == nil || a.planned.core() != r {
 		return true
 	}
 	o := a.xrayOptions()
-	o.APIPort = r.opts.APIPort
-	if o == r.opts {
+	if o == a.running.opts {
 		return false
 	}
-	backend, err := xray.BuildBackend(o, r.b)
-	if err != nil || !bytes.Equal(backend, r.cfg) {
-		return true
+	if o.TUN.Enabled != r.opts.TUN.Enabled {
+		return true // the physical network the core binds to comes and goes with the TUN
 	}
-	front, err := xray.BuildFront(o, f.f)
-	return err != nil || !bytes.Equal(front, f.cfg) // e.g. a TUN option without TUN changes nothing
+	s := r.coreSpec
+	s.opts = o
+	return !r.serves(s)
 }
 
-// connectionTarget returns the actual serving target only once it agrees with the
-// UI's current plan. Checks must not label requests to an old listener as a new node.
-// A no-op plan may allocate new snapshots but keeps the same committed target.
-func (a *App) connectionTarget() *coreTarget {
-	t := a.live.Load()
-	if a.closing || a.Conn != StateOn || t == nil || t.id != a.ActiveID ||
-		t.seq != a.pairSeq || t.connSeq != a.connSeq || a.run == nil || a.frontRun == nil ||
-		t.run.core != a.run.core || !bytes.Equal(t.run.cfg, a.run.cfg) || !bytes.Equal(t.front.cfg, a.frontRun.cfg) {
+// connCore returns the connection's core once it runs the newest plan: checks must not label requests
+// through an old core as through a new node.
+func (a *App) connCore() *runningCore {
+	t, r := a.planned, a.planned.core()
+	if a.closing || a.Conn != StateOn || r == nil || t.id != a.ActiveID || t.connSeq != a.connSeq ||
+		a.running.core() != r || a.live.Load() != r {
 		return nil
 	}
-	return t
+	return r
 }
 
 // Checkable reports whether the connection can be checked now (TestReal, CheckOverview): connected, and
-// with no change planned that the cores have yet to carry out.
-func (a *App) Checkable() bool { return a.connectionTarget() != nil }
+// with no change planned that the core has yet to carry out.
+func (a *App) Checkable() bool { return a.connCore() != nil }
 
 // ProxyPort describes the committed listener while connected; edited settings wait for a reconnect.
 func (a *App) ProxyPort() int {
@@ -376,17 +428,12 @@ func (a *App) restoreProxy() {
 	if b == nil {
 		return
 	}
-	cur, err := a.Proxy.Current()
+	owned, err := restoreOwnedProxy(a.Proxy, b)
 	if err != nil {
-		a.ProxyErr = "读取系统代理失败：" + err.Error()
+		a.ProxyErr = err.Error()
 		return
 	}
-	if cur.Enabled && b.Owns(cur.Server) {
-		if err := a.Proxy.Apply(b.Previous); err != nil {
-			a.ProxyErr = "恢复系统代理失败：" + err.Error()
-			return
-		}
-	} else {
+	if !owned {
 		a.QueueLog("[RayDock] 系统代理已被其它程序修改，保持不动")
 	}
 	a.State.ProxyBackup = nil

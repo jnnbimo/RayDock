@@ -46,7 +46,7 @@ func TestTaskXML(t *testing.T) {
 
 // The Task Scheduler is reached through its COM interface: a task that does not exist reads as absent.
 func TestTaskSchedulerMissingTask(t *testing.T) {
-	if _, ok := taskCommand(`RayDock Test \ no such task`); ok {
+	if _, _, ok := taskDetails(`RayDock Test \ no such task`); ok {
 		t.Fatal("a missing task reads as present")
 	}
 	if err := deleteTask("RayDock Test no such task"); err != nil {

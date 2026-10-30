@@ -9,6 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+	"unicode/utf8"
+
 	"raydock/internal/app"
 	"raydock/internal/app/apptest"
 	"raydock/internal/node"
@@ -16,11 +22,6 @@ import (
 	"raydock/internal/sysproxy"
 	"raydock/internal/system"
 	"raydock/internal/xray"
-	"slices"
-	"strings"
-	"testing"
-	"time"
-	"unicode/utf8"
 )
 
 func TestImportAndCoreFailure(t *testing.T) {
@@ -601,13 +602,13 @@ func TestDedicatedPortTaken(t *testing.T) {
 	if a.PortErrs[idA] != "端口已被其他程序占用" || a.PortErrs[idB] != "" {
 		t.Fatalf("errors %v", a.PortErrs)
 	}
-	if front := string(a.FrontConfig()); strings.Contains(front, fmt.Sprint(taken)) || !strings.Contains(front, fmt.Sprint(free)) {
-		t.Fatalf("front %s", front)
+	if cfg := string(a.CoreConfig()); strings.Contains(cfg, fmt.Sprint(taken)) || !strings.Contains(cfg, fmt.Sprint(free)) {
+		t.Fatalf("config %s", cfg)
 	}
 	l.Close()
 	a.SyncCores()
-	if front := string(a.FrontConfig()); !strings.Contains(front, fmt.Sprint(taken)) || a.PortErrs[idA] != "" {
-		t.Fatalf("the port freed: errors %v front %s", a.PortErrs, front)
+	if cfg := string(a.CoreConfig()); !strings.Contains(cfg, fmt.Sprint(taken)) || a.PortErrs[idA] != "" {
+		t.Fatalf("the port freed: errors %v config %s", a.PortErrs, cfg)
 	}
 }
 
@@ -695,9 +696,8 @@ func TestSubscriptionKeepsOrder(t *testing.T) {
 	}
 }
 
-// The dedicated ports run on the cores of the connection: disconnected, the cores serve them alone; under
-// TUN the backend core dials each port's chain through the physical interface, as the connection's. Once
-// the connection ends, the cores serve the ports alone again, off the interface.
+// The core serves the dedicated ports with the connection, or alone without one. Under TUN it dials each
+// chain through the physical interface. Once the connection ends, it serves the ports off the interface.
 func TestDedicatedPortsUnderTUN(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
@@ -708,25 +708,26 @@ func TestDedicatedPortsUnderTUN(t *testing.T) {
 	a.InstallCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	port, p := a.State.Nodes[1].ID, freeTCPPort(t)
-	tag := fmt.Sprintf("port-%d-proxy", p)
+	tag := fmt.Sprintf("\"port-%d\"", p) // its inbound, whose connections take its chain
 	if err := a.SetNodePort(port, p); err != nil {
 		t.Fatal(err)
 	}
-	back, front := string(a.BackendConfig()), string(a.FrontConfig())
-	if !strings.Contains(front, fmt.Sprintf(`"port": %d`, p)) || strings.Contains(front, fmt.Sprintf("mixed-in-%d", a.State.Settings.Port)) || !strings.Contains(back, tag) ||
-		strings.Contains(back, `"interface"`) || strings.Contains(back, `"dns"`) {
-		t.Fatalf("the ports alone: front %s backend %s", front, back)
+	cfg := string(a.CoreConfig())
+	if !strings.Contains(cfg, fmt.Sprintf(`"port": %d`, p)) || strings.Contains(cfg, "mixed-in") || !strings.Contains(cfg, tag) ||
+		strings.Contains(cfg, `"interface"`) || strings.Contains(cfg, `"dns"`) {
+		t.Fatalf("the ports alone: %s", cfg)
 	}
 	h.Wait(t, func() bool { return a.PortErrs[port] != "" }) // the placeholder cores fail
 	a.State.Settings.TUN.Enabled = true
 	a.Connect(a.State.Nodes[0].ID, nil)
-	if back := string(a.BackendConfig()); !strings.Contains(back, tag) || !strings.Contains(back, `"interface"`) {
-		t.Fatalf("under TUN the ports' chains should be bound to the physical interface: %s", back)
+	if cfg := string(a.CoreConfig()); !strings.Contains(cfg, tag) || !strings.Contains(cfg, `"interface"`) || !strings.Contains(cfg, `"protocol": "tun"`) || !strings.Contains(cfg, "mixed-in") {
+		t.Fatalf("under TUN one core serves the TUN, local port and dedicated ports: %s", cfg)
 	}
-	// The placeholder cores fail: the connection ends with the TUN, and the cores serve the port alone again.
+	// The placeholder core fails: the connection ends with the TUN, and the core serves the port off the
+	// interface again.
 	h.Wait(t, func() bool {
-		cfg, _ := os.ReadFile(filepath.Join(a.DataDir, "config.json"))
-		return a.Conn == app.StateOff && strings.Contains(string(cfg), tag) && !strings.Contains(string(cfg), `"interface"`)
+		cfg := string(a.CoreConfig())
+		return a.Conn == app.StateOff && a.PortErrs[port] != "" && strings.Contains(cfg, tag) && !strings.Contains(cfg, `"interface"`)
 	})
 }
 

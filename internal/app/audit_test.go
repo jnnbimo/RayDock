@@ -8,12 +8,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"raydock/internal/node"
-	"raydock/internal/xray"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"raydock/internal/node"
+	"raydock/internal/xray"
 )
 
 func TestMeasurementsRejectEditedConfiguration(t *testing.T) {
@@ -154,8 +156,10 @@ func TestPinEditedWhileInFlight(t *testing.T) {
 	}
 }
 
-func TestHotSwitchRejectsOldRealTest(t *testing.T) {
+// A test through the core before a switch reports nothing for the node switched to.
+func TestSwitchRejectsOldRealTest(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
+	placeholderCore(t, a)
 	started, release := make(chan struct{}), make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-release; w.WriteHeader(502) }))
 	defer srv.Close()
@@ -165,7 +169,7 @@ func TestHotSwitchRejectsOldRealTest(t *testing.T) {
 	first, second := &a.State.Nodes[0], &a.State.Nodes[1]
 	a.State.Settings.Port = port
 	defer runningFake(t, a, first.ID)()
-	a.live.Store(a.planned) // the old listener is already committed, not merely planned
+	liveFake(a, a.planned) // the old listener is already committed, not merely planned
 	a.TestReal()
 	select {
 	case <-started:
@@ -173,11 +177,10 @@ func TestHotSwitchRejectsOldRealTest(t *testing.T) {
 		close(release)
 		t.Fatal("not started")
 	}
-	seq := a.connSeq
 	a.Connect(second.ID, nil)
-	if a.ActiveID != second.ID || a.connSeq != seq {
+	if a.ActiveID != second.ID || a.planned.id != second.ID {
 		close(release)
-		t.Fatalf("not a hot switch: %s", a.ConnErr)
+		t.Fatalf("not switched: %s", a.ConnErr)
 	}
 	close(release)
 	select {
@@ -324,18 +327,25 @@ func TestInstalledVersionMustBeVerified(t *testing.T) {
 	}
 }
 
-func TestCoreReplacementWaitsForPinWorkers(t *testing.T) {
+func TestCoreReplacementCancelsAndResumesPinWorkers(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
 	placeholderCore(t, a)
-	started, release, installed := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	var attempt atomic.Int32
 	a.CertPin = func(ctx context.Context, _ *node.Node) (string, error) {
-		close(started)
-		select {
-		case <-release:
-			return "pin", nil
-		case <-ctx.Done():
+		if attempt.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			if b, _ := os.ReadFile(a.coreExe()); string(b) == "new" {
+				t.Error("files replaced before the old pin worker released them")
+			}
+			close(cancelled)
 			return "", ctx.Err()
 		}
+		if b, _ := os.ReadFile(a.coreExe()); string(b) != "new" {
+			t.Error("pin retry ran before replacement")
+		}
+		return "pin", nil
 	}
 	a.ReadCoreVersion = func(string) (string, error) { return xray.MinTUNVersion, nil }
 	a.ImportLinks("trojan://p@localhost:443?allowInsecure=1", "")
@@ -345,17 +355,18 @@ func TestCoreReplacementWaitsForPinWorkers(t *testing.T) {
 		t.Fatal("pin not started")
 	}
 	src := coreFilesIn(t, "new")
-	a.coreJob("install", "安装", func(*http.Client) (string, error) { close(installed); return src, nil })
-	<-installed // the download is complete; the replacement waits for the worker
-	waitRegression(t, posts, func() bool { return a.coreHold })
-	waitOperation(t, a.coreDo(func() {}))
-	if b, _ := os.ReadFile(a.coreExe()); string(b) == "new" {
-		t.Fatal("files replaced while pin worker used core")
-	}
-	close(release)
+	a.coreJob("install", "安装", func(*http.Client) (string, error) { return src, nil })
 	waitRegression(t, posts, func() bool { return !a.CoreBusy && a.State.Nodes[0].AutoPin == "pin" })
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("the previous pin batch was not cancelled")
+	}
 	if b, _ := os.ReadFile(a.coreExe()); string(b) != "new" {
 		t.Fatal("replacement never completed")
+	}
+	if attempt.Load() != 2 {
+		t.Fatalf("pin attempts %d, want one cancelled and one retried", attempt.Load())
 	}
 }
 

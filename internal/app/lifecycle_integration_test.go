@@ -14,6 +14,8 @@ import (
 	"raydock/internal/xray"
 )
 
+// The core exiting while a restart to a node Xray refuses waits its turn: the connection ends, nothing
+// left running.
 func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	root := os.Getenv("RAYDOCK_CORE_DIR")
 	if root == "" {
@@ -32,7 +34,7 @@ func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	if a.Conn != StateOn {
 		t.Fatal(a.ConnErr)
 	}
-	old := a.run.core
+	old := a.running.core().core
 	gate, entered := make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	defer release()
@@ -50,7 +52,7 @@ func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	// exercises rollback as well as the exit callback's committed ownership.
 	for deadline := time.Now().Add(3 * time.Second); old.Running(); {
 		if time.Now().After(deadline) {
-			t.Fatal("old backend did not exit")
+			t.Fatal("old core did not exit")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -60,7 +62,7 @@ func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	waitOperation(t, a.coreDo(func() {}))
 	drainRegression(posts)
 	if a.ConnErr == "" || coresRunning(a) {
-		t.Fatalf("dead backend was restored or left running: state=%v error=%q", a.Conn, a.ConnErr)
+		t.Fatalf("dead core was restored or left running: state=%v error=%q", a.Conn, a.ConnErr)
 	}
 }
 
@@ -126,7 +128,7 @@ func TestIntegrationGeoDownloadBesideQueuedStart(t *testing.T) {
 	waitRegression(t, posts, func() bool { return !a.GeoBusy && a.Conn == StateOn || a.ConnErr != "" })
 	waitOperation(t, a.coreDo(func() {}))
 	drainRegression(posts)
-	if a.Conn != StateOn || a.ConnErr != "" || a.GeoErr != "" || a.coreHold || !a.run.core.Running() {
+	if a.Conn != StateOn || a.ConnErr != "" || a.GeoErr != "" || a.coreHold || !a.running.core().core.Running() {
 		t.Fatalf("start/commit failed: state=%v connection=%q geo=%q hold=%v", a.Conn, a.ConnErr, a.GeoErr, a.coreHold)
 	}
 }

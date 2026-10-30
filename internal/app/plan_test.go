@@ -30,32 +30,8 @@ func TestOperationQueueNeverBlocks(t *testing.T) {
 	waitOperation(t, queueOperation(ops, func() {}))
 }
 
-// Targets set while their operation waits replace each other: only the newest is carried out, with what
-// those replaced asked for merged in. One set after a barrier is carried out after it.
-func TestLatestCarriesNewestInOrder(t *testing.T) {
-	ops := newOperationQueue()
-	defer close(ops)
-	queue := func(op func()) <-chan struct{} { return queueOperation(ops, op) }
-	gate, entered := make(chan struct{}), make(chan struct{})
-	queueOperation(ops, func() { close(entered); <-gate })
-	<-entered
-	var l latest[[]string]
-	var ran []string
-	run := func(t *[]string) { ran = append(ran, strings.Join(*t, "+")) }
-	merge := func(old, t *[]string) { *t = append(*old, *t...) }
-	l.set(&[]string{"a"}, merge, queue, run)
-	l.set(&[]string{"b"}, merge, queue, run)
-	l.barrier()
-	queueOperation(ops, func() { ran = append(ran, "barrier") })
-	done := l.set(&[]string{"c"}, merge, queue, run)
-	close(gate)
-	waitOperation(t, done)
-	if got := strings.Join(ran, ","); got != "barrier,a+b+c" {
-		t.Fatalf("ran %s", got)
-	}
-}
-
-// Another node with the same connection settings needs no other core, but is the node connected now.
+// Another node with the same connection settings is another node: the connection moves to it, its core
+// restarted as for any other.
 func TestEquivalentNodeIsConnected(t *testing.T) {
 	a, _, _ := newRegressionApp(t)
 	a.ImportLinks("socks://127.0.0.1:9#first", "")
@@ -66,17 +42,16 @@ func TestEquivalentNodeIsConnected(t *testing.T) {
 	a.ImportLinks("socks://127.0.0.1:9#second", other)
 	first, second := a.State.Nodes[0].ID, a.State.Nodes[1].ID
 	t.Cleanup(runningFake(t, a, first))
-	run := a.run.core
 	a.Connect(second, nil)
-	if a.ActiveID != second || a.State.LastID != second || a.run.core != run || a.ConnErr != "" {
-		t.Fatalf("active %q last %q, same backend %v, err %q", a.ActiveID, a.State.LastID, a.run.core == run, a.ConnErr)
+	if a.ActiveID != second || a.State.LastID != second || a.ConnErr != "" {
+		t.Fatalf("active %q last %q, err %q", a.ActiveID, a.State.LastID, a.ConnErr)
 	}
-	if a.planned == nil || a.planned.id != second {
-		t.Fatal("the cores' target keeps the node switched from")
+	if a.planned == nil || a.planned.id != second || !a.planned.switched {
+		t.Fatal("the core's target keeps the node switched from")
 	}
 }
 
-// A dedicated port removed before the cores got to starting it starts nothing.
+// A dedicated port removed before the core got to starting it starts nothing.
 func TestPortWithdrawnBeforeItsTurn(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
 	placeholderCore(t, a)
@@ -89,8 +64,8 @@ func TestPortWithdrawnBeforeItsTurn(t *testing.T) {
 	if err := a.SetNodePort(id, port); err != nil {
 		t.Fatal(err)
 	}
-	if a.planned == nil || a.planned.run.b.Connected() {
-		t.Fatal("the cores should start for the port alone")
+	if r := a.planned.core(); r == nil || r.run.Chain != nil {
+		t.Fatal("the core should start for the port alone")
 	}
 	if err := a.SetNodePort(id, 0); err != nil {
 		t.Fatal(err)

@@ -20,7 +20,7 @@ func TestDNSResolversKeepDistinctRoles(t *testing.T) {
 				if _, tag := findRule(rules, "inboundTag", tagDNS); tag != tagDirectDNS {
 					t.Fatalf("domestic resolver goes to %q", tag)
 				}
-				want := tagProxy
+				want := testProxy
 				if mode == ModeDirect {
 					want = tagDirectDNS
 				}

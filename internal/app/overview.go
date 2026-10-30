@@ -8,7 +8,7 @@ import (
 )
 
 // The home page checks the connection: what its exit IP is, and which services it reaches. Results belong
-// to the cores they were checked through; a node switched or settings applied make them stale.
+// to the core they were checked through; another start of it makes them stale.
 
 // checkTimeout bounds each check.
 const checkTimeout = 10 * time.Second
@@ -45,9 +45,9 @@ func (o *Overview) Testing() bool {
 	return false
 }
 
-// OverviewKey names the route the connection's requests take: the connection (its node and start) and
-// the changes made to where they go since (routeGen). A change planned is made, and changes the key, before
-// a check can start through it (Checkable).
+// OverviewKey names the core the connection's requests take: the connection (its node and start) and
+// the starts of its core since (routeGen). A change planned is made, and changes the key, before a check
+// can start through it (Checkable).
 func (a *App) OverviewKey() string {
 	return fmt.Sprintf("%s@%d#%d", a.ActiveID, a.Since.UnixNano(), a.routeGen)
 }
@@ -57,18 +57,17 @@ func (a *App) OverviewCurrent() bool { return a.Conn == StateOn && a.Overview.Ke
 
 // CheckOverview checks the connection, unless it was checked already and not again.
 func (a *App) CheckOverview(again bool) {
-	target := a.connectionTarget()
+	target := a.connCore()
 	if target == nil || a.OverviewCurrent() && (!again || a.Overview.Testing()) {
 		return
 	}
-	key, ctx, port := a.OverviewKey(), a.connCtx, target.run.opts.Port
+	key, ctx, port := a.OverviewKey(), a.connCtx, target.opts.Port
 	o := Overview{Key: key, IPTesting: true, Services: make([]ServiceCheck, len(probe.Services))}
 	for i, s := range probe.Services {
 		o.Services[i] = ServiceCheck{Name: s.Name, AI: s.AI, Testing: true}
 	}
 	a.Overview = o
-	// Results only land in the check they were made for, on the route they were made through. A change of
-	// a dedicated port alone keeps the route: its connections finish on the backend core it replaced.
+	// Results only land in the check they were made for, through the core they were made through.
 	post := func(fn func(o *Overview)) {
 		a.Post(func() {
 			if a.Overview.Key == key && a.OverviewCurrent() {

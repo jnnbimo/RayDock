@@ -170,7 +170,12 @@ func deleteTask(name string) error {
 // taskDefinition returns the XML definition of task name; ok is false when there is no such task or it
 // cannot be read.
 func taskDefinition(name string) (xml string, ok bool) {
-	err := withRootFolder(func(folder comObject) error {
+	s, err := readTaskDefinition(name)
+	return s, err == nil
+}
+
+func readTaskDefinition(name string) (xml string, err error) {
+	err = withRootFolder(func(folder comObject) error {
 		n, err := newBSTR(name)
 		if err != nil {
 			return err
@@ -189,5 +194,5 @@ func taskDefinition(name string) (xml string, ok bool) {
 		procSysFreeString.Call(uintptr(unsafe.Pointer(text)))
 		return nil
 	})
-	return xml, err == nil
+	return xml, err
 }

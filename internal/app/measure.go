@@ -81,11 +81,14 @@ func (a *App) TestLatency(ids []string) error {
 	}
 	a.LatencyBusy = true
 	exe, strategy := a.coreExe(), a.State.Settings.DNSStrategy
+	ctx, cancel := context.WithCancel(a.workCtx)
+	a.latencyCancel = cancel
 	a.tests.Add(1)
 	go func() {
 		defer a.tests.Done()
+		defer cancel()
 		// Each result shows as soon as it is in.
-		a.measureLatency(exe, strategy, jobs, func(j latencyJob, l Latency) {
+		a.measureLatency(ctx, exe, strategy, jobs, func(j latencyJob, l Latency) {
 			a.Post(func() {
 				if a.measurementCurrent(j.id, j.source) {
 					a.Latency[j.id] = l
@@ -95,7 +98,7 @@ func (a *App) TestLatency(ids []string) error {
 			})
 		})
 		a.Post(func() {
-			a.LatencyBusy = false
+			a.LatencyBusy, a.latencyCancel = false, nil
 			// Nodes whose result never came, the test ended early: they are not testing any more.
 			for _, j := range jobs {
 				if a.Latency[j.id].Testing {
@@ -160,8 +163,8 @@ type latencyJob struct {
 }
 
 // measureLatency measures jobs and reports each with set.
-func (a *App) measureLatency(exe, strategy string, jobs []latencyJob, set func(latencyJob, Latency)) {
-	ports, err := a.startLatencyCore(exe, filepath.Join(a.DataDir, "latency.json"), strategy, jobs)
+func (a *App) measureLatency(ctx context.Context, exe, strategy string, jobs []latencyJob, set func(latencyJob, Latency)) {
+	ports, err := a.startLatencyCore(ctx, exe, filepath.Join(a.DataDir, "latency.json"), strategy, jobs)
 	if err != nil {
 		a.QueueLog("[RayDock] 延迟测试：" + err.Error())
 	} else {
@@ -171,7 +174,7 @@ func (a *App) measureLatency(exe, strategy string, jobs []latencyJob, set func(l
 	var resolver *net.Resolver
 	var dialErr error
 	if slices.ContainsFunc(jobs, func(j latencyJob) bool { return !j.through }) {
-		if dialer, resolver, dialErr = a.localDialer(exe, filepath.Join(a.DataDir, "resolver.json"), strategy); dialErr != nil {
+		if dialer, resolver, dialErr = a.localDialer(ctx, exe, filepath.Join(a.DataDir, "resolver.json"), strategy); dialErr != nil {
 			a.QueueLog("[RayDock] 延迟测试：" + dialErr.Error())
 		} else {
 			defer a.dnsCore.Stop()
@@ -185,13 +188,13 @@ func (a *App) measureLatency(exe, strategy string, jobs []latencyJob, set func(l
 		case j.through && !routed, !j.through && dialErr != nil:
 			l.Err = "失败"
 		case j.through:
-			l = throughLatency(a.workCtx, port)
+			l = throughLatency(ctx, port)
 		default:
 			n := j.chain[0]
-			l = tcpLatency(a.workCtx, dialer, resolver, family, n.Host, n.Port)
+			l = tcpLatency(ctx, dialer, resolver, family, n.Host, n.Port)
 		}
 		if l.Err == "" && routed {
-			if ip, err := probe.ExitIP(a.workCtx, port, 8*time.Second); err == nil {
+			if ip, err := probe.ExitIP(ctx, port, 8*time.Second); err == nil {
 				l.IP = ip.String()
 			} else {
 				l.IPErr = "失败"
@@ -209,8 +212,8 @@ func (a *App) measureLatency(exe, strategy string, jobs []latencyJob, set func(l
 		}
 	}
 	var wg sync.WaitGroup
-	wg.Go(func() { forEach(a.workCtx, tcp, tcpTests, run) })
-	wg.Go(func() { forEach(a.workCtx, through, throughTests, run) })
+	wg.Go(func() { forEach(ctx, tcp, tcpTests, run) })
+	wg.Go(func() { forEach(ctx, through, throughTests, run) })
 	wg.Wait()
 }
 
@@ -228,7 +231,7 @@ const (
 // startLatencyCore runs the latency core: each job's chain (checked by TestLatency) on a local port, its
 // first node reached through the local network (its name resolved there too). It returns the port of
 // each job.
-func (a *App) startLatencyCore(exe, cfgPath, strategy string, jobs []latencyJob) (map[string]int, error) {
+func (a *App) startLatencyCore(ctx context.Context, exe, cfgPath, strategy string, jobs []latencyJob) (map[string]int, error) {
 	var routes []xray.PortRoute
 	ports := map[string]int{}
 	for _, j := range jobs {
@@ -254,7 +257,7 @@ func (a *App) startLatencyCore(exe, cfgPath, strategy string, jobs []latencyJob)
 	}
 	cfg, err := xray.BuildProbe(routes, local)
 	if err == nil {
-		err = a.latencyCore.Start(exe, cfgPath, cfg)
+		err = a.latencyCore.Start(ctx, exe, cfgPath, cfg, nil)
 	}
 	if err != nil {
 		return nil, err
@@ -324,17 +327,17 @@ func forEach[T any](ctx context.Context, items []T, limit int, fn func(T)) {
 // localDialer returns a dialer bound to the local network and a resolver asking its DNS servers. Where
 // RayDock runs a TUN (Windows) the queries go through a resolver core: outside a strict TUN only Xray
 // may send DNS. It runs until dnsCore is stopped.
-func (a *App) localDialer(exe, cfgPath, strategy string) (*net.Dialer, *net.Resolver, error) {
+func (a *App) localDialer(ctx context.Context, exe, cfgPath, strategy string) (*net.Dialer, *net.Resolver, error) {
 	iface, err := localnet.Find()
 	if err != nil {
 		return nil, nil, err
 	}
-	r, err := localResolver(exe, cfgPath, a.dnsCore, iface, strategy)
+	r, err := localResolver(ctx, exe, cfgPath, a.dnsCore, iface, strategy)
 	return localnet.Dialer(iface), r, err
 }
 
 // localResolver is shared by measurements and certificate pinning. Each caller owns its core lifetime.
-func localResolver(exe, cfgPath string, core *xray.Core, iface *localnet.Interface, strategy string) (*net.Resolver, error) {
+func localResolver(ctx context.Context, exe, cfgPath string, core *xray.Core, iface *localnet.Interface, strategy string) (*net.Resolver, error) {
 	if iface == nil {
 		return net.DefaultResolver, nil
 	}
@@ -346,7 +349,7 @@ func localResolver(exe, cfgPath string, core *xray.Core, iface *localnet.Interfa
 	if err != nil {
 		return nil, err
 	}
-	if err := core.Start(exe, cfgPath, cfg); err != nil {
+	if err := core.Start(ctx, exe, cfgPath, cfg, nil); err != nil {
 		return nil, err
 	}
 	server := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), uint16(port))
@@ -494,7 +497,7 @@ func (a *App) measure(ctx context.Context, exe, cfgPath string, chain []*node.No
 	if err != nil {
 		return Speed{Err: err.Error()}
 	}
-	if err := a.speedCore.Start(exe, cfgPath, cfg); err != nil {
+	if err := a.speedCore.Start(ctx, exe, cfgPath, cfg, nil); err != nil {
 		a.QueueLog("[RayDock] 测速：" + err.Error())
 		return Speed{Err: "核心启动失败"}
 	}
@@ -517,6 +520,13 @@ func (a *App) measure(ctx context.Context, exe, cfgPath string, chain []*node.No
 func (a *App) StopSpeedTest() {
 	if a.speedCancel != nil {
 		a.speedCancel()
+	}
+}
+
+// stopLatencyTest ends the latency test running: the nodes not measured yet get no result.
+func (a *App) stopLatencyTest() {
+	if a.latencyCancel != nil {
+		a.latencyCancel()
 	}
 }
 

@@ -20,7 +20,7 @@ func main() {
 	force := flag.Bool("force", false, "download even if a core is present")
 	flag.Parse()
 
-	if !*force && len(xray.Missing(*dir)) == 0 && xray.ReadGeoTag(*dir) != "" {
+	if !*force && xray.BundleReady(*dir) {
 		v, err := xray.Version(filepath.Join(*dir, xray.ExeName()))
 		if err == nil {
 			fmt.Printf("%s already has Xray %s, skipping (use -force to download again)\n", *dir, v)
@@ -36,7 +36,7 @@ func main() {
 	}
 	fmt.Printf("downloading Xray %s to %s\n", rel.Tag, *dir)
 	last := -1
-	err = xray.Install(ctx, client, rel, *dir, func(done, total int64) {
+	err = xray.PrepareBundle(ctx, client, rel, *dir, func(done, total int64) {
 		if total > 0 {
 			if p := int(done * 100 / total); p/10 != last/10 {
 				last = p
@@ -47,18 +47,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	tag, err := xray.LatestGeo(ctx, client)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("downloading rule data %s\n", tag)
-	if err := xray.InstallGeo(ctx, client, tag, *dir, nil); err != nil {
-		log.Fatal(err)
-	}
-	// RayDock installs the rule data it brings where the installed is older (App.seedGeo).
-	if err := os.WriteFile(filepath.Join(*dir, xray.GeoTagFile), []byte(tag+"\n"), 0o644); err != nil {
-		log.Fatal(err)
-	}
+	fmt.Printf("prepared Xray and full rule data %s\n", xray.ReadGeoTag(*dir))
 	for _, f := range xray.CoreFiles() {
 		fi, _ := os.Stat(filepath.Join(*dir, f))
 		fmt.Printf("  %-12s %d bytes\n", f, fi.Size())

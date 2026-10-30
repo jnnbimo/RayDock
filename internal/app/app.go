@@ -21,6 +21,11 @@ import (
 	"raydock/internal/xray"
 )
 
+type ProxySystem interface {
+	Current() (sysproxy.Settings, error)
+	Apply(sysproxy.Settings) error
+}
+
 // Deps connects the app to the outside world; tests replace them with fakes.
 type Deps struct {
 	Post      func(fn func()) // runs fn on the UI thread and redraws
@@ -28,10 +33,7 @@ type Deps struct {
 		ReadText() string
 		WriteText(string)
 	}
-	Proxy interface {
-		Current() (sysproxy.Settings, error)
-		Apply(sysproxy.Settings) error
-	}
+	Proxy         ProxySystem
 	SetAppearance func(int) // 0 system, 1 light, 2 dark
 	OpenPath      func(string)
 	DataDir       string
@@ -42,6 +44,7 @@ type Deps struct {
 	Autostart     interface {
 		Get() system.StartMode
 		Set(system.StartMode) error
+		AdminRisk() error // why starting with administrator rights is unsafe; nil when it is not
 	}
 	CoreSource      CoreSource
 	ReadCoreVersion func(exe string) (string, error) // nil uses xray.Version; tests can replace process I/O
@@ -79,9 +82,8 @@ const MaxLogs = 2000
 type App struct {
 	Deps
 	State       store.State
-	coreOps     chan func()        // the core operations, in UI issue order
-	coreWant    latest[coreTarget] // the newest change of the running cores planned, for reconcile
-	connCtx     context.Context    // ends with the connection
+	coreOps     chan func()     // the core operations, in UI issue order
+	connCtx     context.Context // ends with the connection
 	connCancel  context.CancelFunc
 	runningPort int // committed local port, distinct from edited settings
 	workCtx     context.Context
@@ -93,42 +95,40 @@ type App struct {
 	connSeq  int // bumped on every connect/disconnect to drop stale results
 	ActiveID string
 	Since    time.Time // connected to ActiveID since
-	routeGen int       // bumped as a change of where the connection's requests go is made (coreTarget.reroute)
+	routeGen int       // bumped as the connection's core starts: the home page checks it again
 	ConnErr  string
 	ProxyErr string
 	RealTest Latency // end-to-end test through the proxy
 	// realTests counts the tests started, so that only the latest sets RealTest.
 	realTests int
-	WaitCore  bool // connecting, waiting for the core download
-	tunOn     bool // the running front core has TUN enabled
-	// The cores of the connection and the dedicated ports (see cores.go) as planned: as they run once the
-	// changes planned are carried out, nil until they run.
-	front    *xray.Core // the front core's process, which only a restart replaces
-	frontRun *frontCore
-	run      *runningCore               // the backend core
-	planned  *coreTarget                // the newest target set for the cores (or the one they start with)
-	live     atomic.Pointer[coreTarget] // actual committed target; written by core operations, read by the UI
-	procs    coreSet                    // the backend core processes, those finishing their connections too
-	pairSeq  int                        // bumped whenever the cores start afresh or stop, to drop stale results
-	// pairCtx ends when the cores start afresh or stop, ending the API calls made to them.
-	pairCtx    context.Context
-	pairCancel context.CancelFunc
-	// drainCtx ends with the cores, stopping the backend cores finishing their connections; drains counts them.
-	drainCtx    context.Context
-	drainCancel context.CancelFunc
-	drains      sync.WaitGroup
+	WaitCore  bool         // connecting, waiting for the core files (resumeConnect)
+	waitOpts  xray.Options // the settings the change waiting for them was asked with
+	// The change of the connection being carried out starts it (fresh) or moves it to another node
+	// (switched); changes made meanwhile add up.
+	connFresh, connSwitched bool
+	// The core and its replacement during a restart (see cores.go).
+	planned *coreTarget                 // the newest plan: running, or starting
+	running *coreTarget                 // the last plan carried out
+	live    atomic.Pointer[runningCore] // the core running; written by core operations, read by the UI
+	procs   coreSet                     // the core processes
+	coreSeq int                         // bumped whenever the core is planned, to drop stale results
+	// coreCtx ends when another core is planned.
+	coreCtx    context.Context
+	coreCancel context.CancelFunc
 
-	Latency     map[string]Latency
-	LatencyBusy bool
+	Latency       map[string]Latency
+	LatencyBusy   bool
+	latencyCancel context.CancelFunc // ends the latency test running
 
 	// Core output is queued and handed to the UI thread in batches.
 	Logs      []LogLine
 	logMu     sync.Mutex
 	logQueued []string
 
-	pinning map[string]bool // nodes whose certificate is being fetched
-	pinMu   sync.Mutex      // serializes background ownership of pinCore
-	pinCore *xray.Core      // physical-network DNS for certificate pinning
+	pinning map[string]bool    // nodes whose certificate is being fetched
+	pinJobs map[*pinBatch]bool // cancellable certificate batches; UI thread only
+	pinMu   sync.Mutex         // serializes background ownership of pinCore
+	pinCore *xray.Core         // physical-network DNS for certificate pinning
 
 	SubBusy map[string]bool // subscription group IDs being fetched
 	subJobs map[string]*subscriptionJob
@@ -145,9 +145,10 @@ type App struct {
 	latencyCore *xray.Core // serves the chains latency tests measure through, from the local network
 
 	PortErrs    map[string]string // why a node's dedicated port does not work, by node ID
-	frontPorts  map[int]bool      // the dedicated ports the front core may hold (portTaken)
+	portChecks  map[int]portCheck // latest actual-core validation, by configured dedicated port
+	ownPorts    map[int]bool      // the dedicated ports the core may hold (portTaken)
 	servedPorts string            // the dedicated ports last logged (notePorts)
-	portBasis   portSettings      // the settings SyncCores last built from
+	portBasis   portSettings      // the settings the dedicated ports follow, as SyncCores last saw them
 
 	saveDue   bool        // the state changed since it was saved, which saveSoon will
 	saveTimer *time.Timer // saveSoon's
@@ -199,7 +200,6 @@ func New(d Deps, st store.State) *App {
 	a := &App{
 		Deps:        d,
 		State:       st,
-		front:       &xray.Core{},
 		coreOps:     newOperationQueue(),
 		workCtx:     ctx,
 		workCancel:  cancel,
@@ -207,6 +207,7 @@ func New(d Deps, st store.State) *App {
 		Latency:     map[string]Latency{},
 		SubBusy:     map[string]bool{},
 		pinning:     map[string]bool{},
+		pinJobs:     map[*pinBatch]bool{},
 		pinCore:     &xray.Core{},
 		Speed:       map[string]Speed{},
 		speedCore:   &xray.Core{},
@@ -222,10 +223,12 @@ func New(d Deps, st store.State) *App {
 			}
 		})
 	}
-	a.front.OnLog = a.QueueLog
-	a.drainCtx, a.drainCancel = context.WithCancel(ctx)
-	a.pairCtx, a.pairCancel = context.WithCancel(ctx)
+	a.coreCtx, a.coreCancel = context.WithCancel(ctx)
 	a.loadTraffic()
+	if d.DataDir != "" {
+		// RayDock 0.1.3's front core config, which no core reads any more.
+		_ = os.Remove(filepath.Join(d.DataDir, "front.json"))
+	}
 	return a
 }
 
@@ -269,24 +272,28 @@ func (a *App) Shutdown() {
 	a.closing = true
 	a.workCancel()
 	a.cancelConnect()
-	a.restoreProxy() // before the cores stop, as on disconnecting: programs go direct, not to a closed port
+	a.restoreProxy() // before the core stops, as on disconnecting: programs go direct, not to a closed port
 	a.StopSpeedTest()
-	<-a.coreDo(a.stopCores)
-	a.drains.Wait() // workCtx ended: they stop at once
+	<-a.coreDo(func() {
+		// The DNS cache a TUN leaves is flushed before RayDock exits.
+		if a.stopCores() && a.FlushDNS != nil {
+			a.FlushDNS()
+		}
+	})
 	if a.trafficDone != nil {
 		<-a.trafficDone
 	}
-	a.flushTraffic() // includes samples queued before closing and every backend's final reading
-	a.procs.closeTraffic()
-	a.endTUN()
+	a.flushTraffic() // includes samples queued before closing and the cores' final reading
 	a.Conn, a.ActiveID, a.WaitCore, a.runningPort = StateOff, "", false, 0
-	a.run, a.frontRun, a.planned = nil, nil, nil
+	a.planned, a.running = nil, nil
 	a.tests.Wait() // workers own their temporary cores until they finish
 	a.speedCore.Stop()
 	a.dnsCore.Stop()
 	a.latencyCore.Stop()
 	a.pinCore.Stop()
 	a.jobs.Wait()
+	// A download cancelled by the shutdown is not resumed: its files go.
+	_ = os.RemoveAll(a.downloadDir())
 	_ = os.RemoveAll(a.geoDownloadDir())
 	if a.saveTimer != nil {
 		a.saveTimer.Stop()
@@ -338,15 +345,17 @@ func (a *App) saveSoon() {
 type portSettings struct {
 	allowLAN bool
 	port     int
+	logLevel string
 }
 
 // SettingChanged saves soon (typing in a rule or DNS field calls it on every key); settings changed while
-// connected take effect after a reconnect.
+// connected take effect on the connection after a reconnect.
 func (a *App) SettingChanged() {
 	a.saveSoon()
 	a.SettingsDirty = a.pending()
-	// LAN access applies to the dedicated ports at once; a local port taking one of theirs sets it aside.
-	if s := a.State.Settings; (portSettings{s.AllowLAN, s.Port}) != a.portBasis {
+	// Without a connection the dedicated ports follow the settings at once: a local port taking one of them
+	// sets it aside.
+	if s := a.State.Settings; (portSettings{s.AllowLAN, s.Port, s.LogLevel}) != a.portBasis {
 		a.SyncCores()
 	}
 }

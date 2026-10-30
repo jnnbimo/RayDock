@@ -11,10 +11,9 @@ import (
 	"raydock/internal/xray"
 )
 
-// Traffic statistics: the backend cores count what leaves through the proxy and direct, their APIs serve
-// the counts (xray.ReadTraffic),
-// a loop reads their counts every second, and the UI thread adds what moved to the day's total and to
-// the rates of the last minute. The totals are kept in traffic.json, the rates only while RayDock runs.
+// Traffic statistics: the cores count what leaves through the proxy and direct, their APIs serve the counts
+// (xray.ReadTraffic), a loop reads them every second, and the UI thread adds what moved to the day's
+// total and to the rates of the last minute. The totals are kept in traffic.json, the rates only while RayDock runs.
 
 const (
 	// RateWindow is how far back Rates go.
@@ -61,14 +60,11 @@ type trafficSample struct {
 // before forgetting the API and stopping the process. Unexpected exits can still lose
 // bytes the dead process no longer exposes; normal retirement must not lose a whole tick.
 func (s *coreSet) readTraffic(ctx context.Context, c *xray.Core) xray.Traffic {
-	port := s.apis[c]
-	if port <= 0 {
+	api, ok := s.apis[c]
+	if !ok {
 		return xray.Traffic{}
 	}
-	if s.client == nil {
-		s.client = xray.StatsClient()
-	}
-	cur, err := xray.ReadTraffic(ctx, s.client, port)
+	cur, err := xray.ReadTraffic(ctx, api.client, api.port)
 	if err != nil {
 		return xray.Traffic{} // keep the previous counters so a later successful reading catches up
 	}
@@ -113,14 +109,6 @@ func (s *coreSet) takeTraffic() []trafficSample {
 	samples := s.samples
 	s.samples = nil
 	return samples
-}
-
-func (s *coreSet) closeTraffic() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.client != nil {
-		s.client.CloseIdleConnections()
-	}
 }
 
 // StartTraffic is idempotent; shutdown waits for the one sampler before its final save.

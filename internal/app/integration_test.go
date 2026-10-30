@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,13 +20,11 @@ import (
 	"raydock/internal/xray"
 )
 
-// While connected, nothing but the TUN restarts the front core, which programs reach: another node, new
-// rule data, an edited node, a new core or a dedicated port start a new backend core beside the old one,
-// which stops at once for another node and otherwise once it carries no connection; the routing mode is
-// switched into the backend core, another local port into the front core. Two cores run, besides those
-// finishing their connections. Disconnected, they serve the dedicated ports alone. A core that exits ends
-// the connection.
-func TestIntegrationSwitchInPlace(t *testing.T) {
+// The core restarts for every change of what it serves (another node, the routing mode, another local
+// port, new rule data, an edited node, the dedicated ports, a new core): the connections it carried end,
+// new ones go through the change. Without a connection it serves the dedicated ports alone. A core that
+// exits ends the connection.
+func TestIntegrationRestartOnChange(t *testing.T) {
 	root := os.Getenv("RAYDOCK_CORE_DIR")
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
@@ -33,6 +34,11 @@ func TestIntegrationSwitchInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.ReadCoreVersion = xray.Version
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("state=%v connection=%q core=%q hold=%v wait=%v logs:\n%s", a.Conn, a.ConnErr, a.CoreErr, a.coreHold, a.WaitCore, strings.Join(logTexts(a), "\n"))
+		}
+	})
 	// The nodes: SOCKS inbounds of a local server core, which may reach local targets.
 	var servers [3]int
 	var inbounds []string
@@ -41,8 +47,8 @@ func TestIntegrationSwitchInPlace(t *testing.T) {
 		inbounds = append(inbounds, fmt.Sprintf(`{"listen":"127.0.0.1","port":%d,"protocol":"socks"}`, servers[i]))
 	}
 	server := xray.Core{}
-	if err := server.Start(filepath.Join(a.CoreDir(), xray.ExeName()), filepath.Join(t.TempDir(), "server.json"), []byte(`{"log":{"loglevel":"warning"},
-		"inbounds":[`+strings.Join(inbounds, ",")+`],"outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow"}]}}]}`)); err != nil {
+	if err := server.Start(context.Background(), filepath.Join(a.CoreDir(), xray.ExeName()), filepath.Join(t.TempDir(), "server.json"), []byte(`{"log":{"loglevel":"warning"},
+		"inbounds":[`+strings.Join(inbounds, ",")+`],"outbounds":[{"protocol":"freedom"}]}`), nil); err != nil {
 		t.Fatal(err)
 	}
 	defer server.Stop()
@@ -52,10 +58,6 @@ func TestIntegrationSwitchInPlace(t *testing.T) {
 	a.State.Settings.ProxyRules = "127.0.0.1/32" // local targets go through the nodes
 	a.ImportLinks(fmt.Sprintf("socks://127.0.0.1:%d#a\nsocks://127.0.0.1:%d#b", servers[0], servers[1]), "")
 	first, second := a.State.Nodes[0].ID, a.State.Nodes[1].ID
-	settle := func() {
-		waitOperation(t, a.coreDo(func() {}))
-		drainRegression(posts)
-	}
 	listening := func(port int) bool {
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
 		if err == nil {
@@ -63,96 +65,64 @@ func TestIntegrationSwitchInPlace(t *testing.T) {
 		}
 		return err == nil
 	}
-	// running counts the core processes: the front core and the backend cores.
+	// running counts the core processes.
 	running := func() int {
 		a.procs.mu.Lock()
 		defer a.procs.mu.Unlock()
 		n := 0
-		for _, c := range append([]*xray.Core{a.front}, a.procs.cores...) {
+		for _, c := range a.procs.cores {
 			if c.Running() {
 				n++
 			}
 		}
 		return n
 	}
-	start := time.Now()
-	a.Connect(first, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
-	t.Logf("connect: %v", time.Since(start).Round(time.Millisecond))
-	front, backend := a.front.PID(), a.run.core
-	if a.Conn != StateOn || front == 0 || backend.PID() == 0 || running() != 2 {
-		t.Fatalf("connect: %v %q, %d cores", a.Conn, a.ConnErr, running())
-	}
-	cores := func(what string, wantBackend bool) {
-		t.Helper()
-		if a.Conn != StateOn || a.front.PID() != front {
-			t.Fatalf("%s: state %v front %d→%d %q", what, a.Conn, front, a.front.PID(), a.ConnErr)
-		}
-		if (a.run.core != backend) != wantBackend || !a.run.core.Running() {
-			t.Fatalf("%s: new backend %v, running %v", what, a.run.core != backend, a.run.core.Running())
-		}
-		backend = a.run.core
-	}
 
-	old, connectedSince := backend, a.Since
-	start = time.Now()
-	a.Connect(second, nil)
-	settle()
-	if !a.Since.After(connectedSince) {
-		t.Fatal("another node: connected since it was switched to")
-	}
-	t.Logf("another node: %v", time.Since(start).Round(time.Millisecond))
-	cores("another node", true)
-	if a.ActiveID != second || old.Running() || running() != 2 {
-		t.Fatalf("another node: id %s; the old backend core stops at once: %v; %d cores", a.ActiveID, old.Running(), running())
-	}
-	since, key := a.Since, a.OverviewKey()
-	a.SetMode(xray.ModeGlobal)
-	settle()
-	cores("a routing mode", false)
-	// The same node stays connected since it connected; the route its requests take changed.
-	if a.run.switches != 1 || a.Since != since || a.OverviewKey() == key {
-		t.Fatalf("a routing mode: run %+v since %v → %v, key %s → %s", a.run, since, a.Since, key, a.OverviewKey())
-	}
-	logs := strings.Join(logTexts(a), "\n")
-	if !strings.Contains(logs, "经原节点的连接已断开") || !strings.Contains(logs, "已建立的连接不中断") || strings.Contains(logs, "无法在运行中") {
-		t.Fatalf("logs %q", logs)
-	}
-
-	// Another local port: the front core opens it, then closes the old one.
-	oldPort := port
-	a.State.Settings.Port, _ = freePort()
-	a.SettingChanged()
-	if !a.SettingsDirty {
-		t.Fatal("a new port waits for a reconnect")
-	}
-	a.Reconnect()
-	settle()
-	cores("another port", false)
-	if a.ProxyPort() != a.State.Settings.Port || !listening(a.ProxyPort()) || listening(oldPort) || a.SettingsDirty {
-		t.Fatalf("another port: %d (listening %v), old %d still %v", a.ProxyPort(), listening(a.ProxyPort()), oldPort, listening(oldPort))
-	}
-
-	// New rule data: a new backend core; the old one carries a transfer begun before to its end, then stops.
-	// /hold sends its second part only once resume closes.
-	resume := make(chan struct{})
-	stream := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/hold" {
-			for range 2 {
-				w.Write(make([]byte, 1024))
-				w.(http.Flusher).Flush()
-				select {
-				case <-resume:
-				case <-r.Context().Done():
-					return
-				}
+	// Include the overlap, not just the steady state, in the process-count assertion.
+	var peak atomic.Int32
+	stopCount, countDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(countDone)
+		for {
+			n := int32(running())
+			if n > peak.Load() {
+				peak.Store(n)
 			}
+			select {
+			case <-stopCount:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stopCount)
+		<-countDone
+		want := int32(1)
+		if xray.Overlap {
+			want = 2
+		}
+		if peak.Load() != want {
+			t.Errorf("peak running client cores = %d, want %d", peak.Load(), want)
+		}
+	})
+
+	// Hold the response after its first KB until the assertion releases it: however long a real core
+	// takes to start (especially under -race), a transfer cannot finish before retirement by itself.
+	var gates sync.Map
+	stream := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gate, ok := gates.Load(r.URL.Path)
+		if !ok {
+			http.Error(w, "unknown transfer", http.StatusBadRequest)
 			return
 		}
-		for range 10 {
-			w.Write(make([]byte, 1024))
-			w.(http.Flusher).Flush()
-			time.Sleep(150 * time.Millisecond)
+		defer gates.Delete(r.URL.Path)
+		w.Write(make([]byte, 1024))
+		w.(http.Flusher).Flush()
+		select {
+		case <-gate.(chan struct{}):
+			w.Write(make([]byte, 9*1024))
+		case <-r.Context().Done():
 		}
 	})}
 	sl, err := net.Listen("tcp", "127.0.0.1:0")
@@ -161,139 +131,154 @@ func TestIntegrationSwitchInPlace(t *testing.T) {
 	}
 	go stream.Serve(sl)
 	defer stream.Close()
-	transfer := func(port int, path ...string) *http.Response { // through the cores and the node
+	type inFlight struct {
+		resp    *http.Response
+		release func()
+	}
+	var transferID int
+	transfer := func(port int) inFlight { // through the core and the node
 		t.Helper()
-		resp, err := probe.ProxyClient(port).Get("http://" + sl.Addr().String() + "/" + strings.Join(path, ""))
+		transferID++
+		path, gate := fmt.Sprintf("/%d", transferID), make(chan struct{})
+		release := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(release)
+		gates.Store(path, gate)
+		resp, err := probe.ProxyClient(port).Get("http://" + sl.Addr().String() + path)
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { resp.Body.Close() })
 		if _, err := io.ReadFull(resp.Body, make([]byte, 1024)); err != nil {
 			t.Fatal(err)
 		}
-		return resp
+		return inFlight{resp, release}
 	}
-	finishes := func(what string, resp *http.Response) {
+	finishes := func(f inFlight) bool {
+		f.release()
+		defer f.resp.Body.Close()
+		n, err := io.Copy(io.Discard, f.resp.Body)
+		return err == nil && n == 9*1024
+	}
+	core := func() *xray.Core {
+		if r := a.running.core(); r != nil {
+			return r.core
+		}
+		return nil
+	}
+	start := time.Now()
+	a.Connect(first, nil)
+	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	if a.Conn != StateOn || core().PID() == 0 || running() != 1 {
+		t.Fatalf("connect: %v %q, %d cores", a.Conn, a.ConnErr, running())
+	}
+	t.Logf("connect: %v", time.Since(start).Round(time.Millisecond))
+	// restarted carries out a change made with a transfer under way: the core restarts, the new one beside
+	// the old one until it runs, and the transfer ends.
+	restarted := func(what string, change func()) {
 		t.Helper()
-		defer resp.Body.Close()
-		if n, err := io.Copy(io.Discard, resp.Body); err != nil || n != 9*1024 {
-			t.Fatalf("%s: the transfer ended after %d bytes: %v", what, n, err)
+		resp, old := transfer(a.ProxyPort()), core()
+		start := time.Now()
+		change()
+		waitRegression(t, posts, func() bool { return a.ConnErr != "" || a.Conn == StateOn && core() != nil && core() != old })
+		if a.Conn != StateOn || a.ConnErr != "" || core() == old || old.Running() || running() != 1 {
+			t.Fatalf("%s: state %v err %q, new core %v", what, a.Conn, a.ConnErr, core() != old)
+		}
+		t.Logf("%s: %v", what, time.Since(start).Round(time.Millisecond))
+		if finishes(resp) {
+			t.Fatalf("%s: a transfer outlived the core restarted", what)
+		}
+		if !finishes(transfer(a.ProxyPort())) {
+			t.Fatalf("%s: a transfer after the restart ended early", what)
 		}
 	}
-	resp := transfer(a.ProxyPort())
-	old = a.run.core
-	a.RenewCores()
-	settle()
-	cores("new rule data", true)
-	if !old.Running() || running() != 3 {
-		t.Fatalf("the old backend core stopped with a transfer: %d cores", running())
-	}
-	finishes("new rule data", resp)
-	eventually(t, posts, func() bool { return !old.Running() && running() == 2 })
 
-	// An edit of the node in use: a new backend core; the old one stops once it carries nothing.
-	old = backend
-	n := *a.NodeByID(second)
-	n.Port = servers[2]
-	if err := a.EditNode(n); err != nil {
-		t.Fatal(err)
+	since := a.Since
+	restarted("another node", func() { a.Connect(second, nil) })
+	if a.ActiveID != second || !a.Since.After(since) {
+		t.Fatal("another node: connected since it was switched to")
 	}
-	settle()
-	cores("node edit", true)
-	eventually(t, posts, func() bool { return !old.Running() })
+	since, key := a.Since, a.OverviewKey()
+	restarted("a routing mode", func() { a.SetMode(xray.ModeGlobal) })
+	if a.Since != since || a.OverviewKey() == key {
+		t.Fatalf("a routing mode: since %v → %v, key %s → %s", since, a.Since, key, a.OverviewKey())
+	}
+	if logs := strings.Join(logTexts(a), "\n"); !strings.Contains(logs, "切换到 b") || !strings.Contains(logs, "应用变更，重新启动核心，已建立的连接会断开") {
+		t.Fatalf("logs %q", logs)
+	}
 
-	// A dedicated port joins: a new backend core; the transfer on the local port goes on.
-	resp = transfer(a.ProxyPort())
-	old = backend
+	oldPort := port
+	a.State.Settings.Port, _ = freePort()
+	a.SettingChanged()
+	if !a.SettingsDirty {
+		t.Fatal("a new port waits for a reconnect")
+	}
+	restarted("another port", a.Reconnect)
+	if a.ProxyPort() != a.State.Settings.Port || !listening(a.ProxyPort()) || listening(oldPort) || a.SettingsDirty {
+		t.Fatalf("another port: %d (listening %v), old %d still %v", a.ProxyPort(), listening(a.ProxyPort()), oldPort, listening(oldPort))
+	}
+	restarted("new rule data", func() { a.RenewCores(change{geo: true}) })
+	restarted("a node edit", func() {
+		n := *a.NodeByID(second)
+		n.Port = servers[2]
+		if err := a.EditNode(n); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// A dedicated port: the core restarts serving it beside the connection.
 	dedicated, _ := freePort()
-	if err := a.SetNodePort(first, dedicated); err != nil {
-		t.Fatal(err)
+	restarted("a dedicated port", func() {
+		if err := a.SetNodePort(first, dedicated); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !listening(dedicated) || running() != 1 || !finishes(transfer(dedicated)) {
+		t.Fatalf("the dedicated port: %d cores", running())
 	}
-	settle()
-	cores("a dedicated port", true)
-	finishes("a dedicated port", transfer(dedicated))
-	finishes("the local port beside a dedicated port", resp)
-	eventually(t, posts, func() bool { return !old.Running() && running() == 2 })
-
-	// A new core: its files are replaced under the running cores; a new backend core starts from them,
-	// the front core goes on.
-	resp = transfer(a.ProxyPort())
-	old = a.run.core
-	a.coreJob("install", "安装", func(*http.Client) (string, error) { return root, nil })
-	if a.Conn != StateOn {
-		t.Fatal("preparing the core touched the connection")
+	// Another node restarts the core, the dedicated port's transfers with it.
+	resp := transfer(dedicated)
+	restarted("back to the first node", func() { a.Connect(first, nil) })
+	if finishes(resp) || running() != 1 {
+		t.Fatal("a transfer through the dedicated port outlived the core restarted")
 	}
-	waitRegression(t, posts, func() bool { return !a.CoreBusy && a.run.core != old })
-	settle()
-	if a.CoreErr != "" {
-		t.Fatal(a.CoreErr)
-	}
-	cores("a new core", true)
-	finishes("a new core", resp)
-	eventually(t, posts, func() bool { return !old.Running() && running() == 2 })
-	if !listening(a.ProxyPort()) {
-		t.Fatal("the local port closed")
+	restarted("a new core", func() {
+		a.coreJob("install", "安装", func(*http.Client) (string, error) { return root, nil })
+	})
+	if a.CoreErr != "" || running() != 1 {
+		t.Fatalf("a new core: %q, %d cores", a.CoreErr, running())
 	}
 
-	// Another node ends the connections made before, those on a backend core still finishing them too.
-	resp = transfer(a.ProxyPort(), "hold")
-	draining := a.run.core
-	a.RenewCores()
-	settle()
-	cores("new rule data again", true)
-	if !draining.Running() || running() != 3 {
-		t.Fatalf("the old backend core stopped with a transfer: %d cores", running())
-	}
-	a.Connect(first, nil)
-	settle()
-	cores("another node after new rule data", true)
-	if a.ActiveID != first || draining.Running() || running() != 2 {
-		t.Fatalf("another node: id %s; the draining backend core stops at once: %v; %d cores", a.ActiveID, draining.Running(), running())
-	}
-	close(resume)
-	if n, err := io.Copy(io.Discard, resp.Body); err == nil && n == 1024 {
-		t.Fatal("a transfer through the node before outlived another node")
-	}
-	resp.Body.Close()
-
-	// Disconnected: the cores serve the dedicated port alone, the local port closed. What the backend core
-	// carried ends with the connection, the dedicated port's transfers too, which then start again.
-	resp = transfer(dedicated)
+	// Disconnected: the core restarts serving the dedicated port alone.
 	local := a.ProxyPort()
 	a.Disconnect()
-	settle()
-	if n, err := io.Copy(io.Discard, resp.Body); err == nil && n == 9*1024 {
-		t.Fatal("a transfer outlived the connection's backend core")
+	eventually(t, posts, func() bool { return a.running != nil && a.running.id == "" && core() != nil && listening(dedicated) })
+	if a.Conn != StateOff || listening(local) || running() != 1 || !finishes(transfer(dedicated)) {
+		t.Fatalf("disconnected: state %v local %v, %d cores", a.Conn, listening(local), running())
 	}
-	resp.Body.Close()
-	if a.Conn != StateOff || a.front.PID() != front || listening(local) || !listening(dedicated) {
-		t.Fatalf("disconnected: state %v front %d→%d local %v", a.Conn, front, a.front.PID(), listening(local))
-	}
-	eventually(t, posts, func() bool { return running() == 2 })
-	finishes("the dedicated port disconnected", transfer(dedicated))
-	// Connected again beside it, then without it the cores stop with the connection.
+	// Connected again beside it, then without it.
 	a.Connect(first, nil)
-	settle()
-	if a.Conn != StateOn || a.front.PID() != front {
+	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	if a.Conn != StateOn || !listening(dedicated) || running() != 1 {
 		t.Fatalf("connected beside the dedicated port: %v %q", a.Conn, a.ConnErr)
 	}
-	if err := a.SetNodePort(first, 0); err != nil {
-		t.Fatal(err)
-	}
-	settle()
-	if listening(dedicated) {
-		t.Fatal("the dedicated port removed still listens")
-	}
-
-	// The backend core exiting ends the connection, every core included.
-	proc, err := os.FindProcess(a.run.core.PID())
+	restarted("no dedicated port", func() {
+		if err := a.SetNodePort(first, 0); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if listening(dedicated) || running() != 1 {
+		t.Fatal("the dedicated port should be gone")
+	} // The core exiting ends the connection.
+	proc, err := os.FindProcess(core().PID())
 	if err != nil {
 		t.Fatal(err)
 	}
 	proc.Kill()
 	waitRegression(t, posts, func() bool { return a.Conn == StateOff })
-	settle()
+	waitOperation(t, a.coreDo(func() {}))
+	drainRegression(posts)
 	if !strings.Contains(a.ConnErr, "核心") || coresRunning(a) {
-		t.Fatalf("after the backend core exited: err %q running %v", a.ConnErr, coresRunning(a))
+		t.Fatalf("after the core exited: err %q running %v", a.ConnErr, coresRunning(a))
 	}
 	a.Shutdown()
 	drainRegression(posts)
@@ -346,13 +331,13 @@ func TestIntegrationConnectionOperationOrder(t *testing.T) {
 		a.Connect(first, nil)
 		a.Connect(second, nil)
 		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
-		if a.Conn != StateOn || a.ActiveID != second || !a.front.Running() {
+		if a.Conn != StateOn || a.ActiveID != second || !coresRunning(a) {
 			t.Fatalf("latest connection not committed: state=%v id=%s error=%q", a.Conn, a.ActiveID, a.ConnErr)
 		}
 		a.Disconnect()
 		a.Connect(first, nil)
 		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
-		if a.Conn != StateOn || a.ActiveID != first || !a.front.Running() {
+		if a.Conn != StateOn || a.ActiveID != first || !coresRunning(a) {
 			t.Fatalf("older Stop killed latest Start: %q", a.ConnErr)
 		}
 		a.Disconnect()
@@ -379,15 +364,14 @@ func TestIntegrationConnectionOperationOrder(t *testing.T) {
 	}
 }
 
-// A change the cores fail to reach leaves the connection on what runs, the failure shown, however many
-// changes were planned on it meanwhile: a node Xray refuses, then another local port; a new backend core
-// whose port is taken, then another local port.
-func TestIntegrationFailedChangeKeepsWhatRuns(t *testing.T) {
+// A restart the core fails ends the connection with the reason, the old core already stopped: a node Xray
+// refuses, a local port another program took. The next change starts afresh.
+func TestIntegrationFailedRestartEnds(t *testing.T) {
 	root := os.Getenv("RAYDOCK_CORE_DIR")
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	for _, backend := range []bool{false, true} {
+	for _, taken := range []bool{false, true} {
 		a, posts, _ := newRegressionApp(t)
 		if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 			t.Fatal(err)
@@ -403,45 +387,29 @@ func TestIntegrationFailedChangeKeepsWhatRuns(t *testing.T) {
 		if a.Conn != StateOn {
 			t.Fatal(a.ConnErr)
 		}
-		live, port := a.planned, a.runningPort
-		gate, entered := make(chan struct{}), make(chan struct{})
-		a.coreDo(func() { close(entered); <-gate })
-		<-entered
-		if backend {
-			a.State.Settings.DirectDNS = "1.1.1.1" // a new backend core
-			a.Reconnect()
-			blocker, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", a.run.b.Mixed))
+		if taken {
+			a.State.Settings.Port, _ = freePort()
+			blocker, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", a.State.Settings.Port))
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer blocker.Close()
+			a.Reconnect()
 		} else {
 			a.Connect(broken, nil)
 		}
+		waitRegression(t, posts, func() bool { return a.Conn == StateOff })
+		waitOperation(t, a.coreDo(func() {}))
+		drainRegression(posts)
+		if a.ConnErr == "" || coresRunning(a) {
+			t.Fatalf("taken %v: err %q, running %v", taken, a.ConnErr, coresRunning(a))
+		}
+		// What failed is not left in the way of the next connection.
 		a.State.Settings.Port, _ = freePort()
-		a.Reconnect()
-		close(gate)
-		waitOperation(t, a.coreDo(func() {}))
-		drainRegression(posts)
-		if a.Conn != StateOn || a.ConnErr == "" || a.ActiveID != first || a.State.LastID != first || a.runningPort != port {
-			t.Fatalf("backend %v: state %v active %q last %q port %d→%d err %q", backend, a.Conn, a.ActiveID, a.State.LastID, port, a.runningPort, a.ConnErr)
-		}
-		if a.planned != live || !live.run.core.Running() || !a.front.Running() || !a.SettingsDirty {
-			t.Fatalf("backend %v: not back on the cores that run, or the settings not left pending", backend)
-		}
-		a.procs.mu.Lock()
-		n := len(a.procs.cores)
-		a.procs.mu.Unlock()
-		if n != 1 {
-			t.Fatalf("backend %v: %d backend cores, want the one that runs", backend, n)
-		}
-		// What failed is not left in the way of the next change.
-		a.State.Settings.DirectDNS = "223.5.5.5"
-		a.Reconnect()
-		waitOperation(t, a.coreDo(func() {}))
-		drainRegression(posts)
-		if a.Conn != StateOn || a.ConnErr != "" || a.runningPort != a.State.Settings.Port {
-			t.Fatalf("backend %v: the next change: state %v port %d err %q", backend, a.Conn, a.runningPort, a.ConnErr)
+		a.Connect(first, nil)
+		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+		if a.Conn != StateOn || a.ConnErr != "" {
+			t.Fatalf("taken %v: the next connection: state %v err %q", taken, a.Conn, a.ConnErr)
 		}
 	}
 }

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -16,10 +17,9 @@ import (
 	"raydock/internal/xray"
 )
 
-// The backend cores count what goes through the proxy once, across a backend core replaced by another
-// node. Local processes only: direct traffic cannot be, as the backend core's direct outbound refuses
-// private addresses (Xray's freedom does so behind a VLESS inbound). RAYDOCK_DIRECT_URL, a site the
-// rules send direct, checks it too.
+// The core counts what goes through the proxy once, its counts adding up across the restarts for another
+// node and new rule data. Local targets only: RAYDOCK_DIRECT_URL, a site the rules send direct, checks
+// direct traffic too.
 func TestIntegrationTraffic(t *testing.T) {
 	root := os.Getenv("RAYDOCK_CORE_DIR")
 	if root == "" {
@@ -36,9 +36,9 @@ func TestIntegrationTraffic(t *testing.T) {
 		servers[i], _ = freePort()
 	}
 	server := xray.Core{}
-	if err := server.Start(filepath.Join(a.CoreDir(), xray.ExeName()), filepath.Join(t.TempDir(), "server.json"), fmt.Appendf(nil, `{"log":{"loglevel":"warning"},
+	if err := server.Start(context.Background(), filepath.Join(a.CoreDir(), xray.ExeName()), filepath.Join(t.TempDir(), "server.json"), fmt.Appendf(nil, `{"log":{"loglevel":"warning"},
 		"inbounds":[{"listen":"127.0.0.1","port":%d,"protocol":"socks"},{"listen":"127.0.0.1","port":%d,"protocol":"socks"}],
-		"outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow"}]}}]}`, servers[0], servers[1])); err != nil {
+		"outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow"}]}}]}`, servers[0], servers[1]), nil); err != nil {
 		t.Fatal(err)
 	}
 	defer server.Stop()
@@ -110,12 +110,20 @@ func TestIntegrationTraffic(t *testing.T) {
 	}
 	counted(proxied, direct)
 
-	// Another node runs on a new backend core, whose counts add to those before.
-	old := a.run.core
-	a.Connect(a.State.Nodes[1].ID, nil)
-	eventually(t, posts, func() bool { return a.run.core != old && a.run.core.Running() && !old.Running() })
-	fetch(proxyURL)
-	counted(2*proxied, direct)
+	// Another node, then new rule data: each restarts the core, whose counts add to those before.
+	core := func() *xray.Core {
+		if r := a.running.core(); r != nil {
+			return r.core
+		}
+		return nil
+	}
+	for i, do := range []func(){func() { a.Connect(a.State.Nodes[1].ID, nil) }, func() { a.RenewCores(change{geo: true}) }} {
+		old := core()
+		do()
+		eventually(t, posts, func() bool { return a.Conn == StateOn && core() != nil && core() != old && !old.Running() })
+		fetch(proxyURL)
+		counted(int64(i+2)*proxied, direct)
+	}
 	if n := len(a.Rates); n == 0 {
 		t.Fatal("no rates")
 	}

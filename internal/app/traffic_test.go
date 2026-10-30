@@ -83,13 +83,14 @@ func TestTrafficCorruptFile(t *testing.T) {
 	}
 }
 
-// The loop reads each backend core's counts and reports what moved since its last reading; a core gone
+// The loop reads each core's counts and reports what moved since its last reading; a core gone
 // is dropped.
 func TestTrafficLoop(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
 	var down atomic.Int64
 	core := &xray.Core{}
-	a.procs.add(core, statsAPI(t, down.Load))
+	port, client := statsAPI(t, down.Load)
+	a.procs.add(core, port, client)
 	down.Store(500)
 	a.StartTraffic()
 	waitRegression(t, posts, func() bool { return a.TrafficOn(time.Now()).ProxyDown == 500 })
@@ -124,10 +125,10 @@ func TestOverviewCheck(t *testing.T) {
 	a.Conn, a.ActiveID, a.Since = StateOn, "n1", time.Now()
 	a.runningPort = proxy.Listener.Addr().(*net.TCPAddr).Port
 	a.connCtx = a.workCtx
-	a.run = &runningCore{opts: xray.Options{Port: a.runningPort}}
-	a.frontRun = &frontCore{}
-	target := &coreTarget{seq: a.pairSeq, connSeq: a.connSeq, id: a.ActiveID, run: a.run, front: a.frontRun, ctx: a.workCtx}
-	a.live.Store(target)
+	conn := &runningCore{coreSpec: coreSpec{opts: xray.Options{Port: a.runningPort}}, core: a.newCore()}
+	target := &coreTarget{seq: a.coreSeq, connSeq: a.connSeq, id: a.ActiveID, ctx: a.workCtx, proc: conn}
+	a.planned, a.running = target, target
+	a.live.Store(conn)
 	a.CheckOverview(false)
 	if !a.Overview.Testing() || !a.OverviewCurrent() {
 		t.Fatalf("checking %+v", a.Overview)
@@ -145,7 +146,7 @@ func TestOverviewCheck(t *testing.T) {
 	a.ActiveID = "n2"
 	next := *target
 	next.id = a.ActiveID
-	a.live.Store(&next)
+	a.planned, a.running = &next, &next
 	if a.OverviewCurrent() {
 		t.Fatal("stale")
 	}
@@ -161,9 +162,9 @@ func TestOverviewCheck(t *testing.T) {
 	}
 }
 
-// statsAPI answers QueryStats as a backend core's API does (xray.ReadTraffic), over HTTP/2 without TLS: the
-// proxy has moved down() bytes down. It returns the API's port.
-func statsAPI(t *testing.T, down func() int64) int {
+// statsAPI answers QueryStats as the core's API does (xray.ReadTraffic), over HTTP/2 without TLS: the
+// proxy has moved down() bytes down. It returns the API's port and a client for it.
+func statsAPI(t *testing.T, down func() int64) (int, *http.Client) {
 	t.Helper()
 	field := func(num int, b []byte) []byte {
 		out := binary.AppendUvarint(nil, uint64(num)<<3|2)
@@ -171,7 +172,7 @@ func statsAPI(t *testing.T, down func() int64) int {
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		s := field(1, []byte("outbound>>>proxy>>>traffic>>>downlink"))
+		s := field(1, []byte("outbound>>>node-0a1b2c3d-proxy>>>traffic>>>downlink"))
 		s = binary.AppendUvarint(append(s, 2<<3), uint64(down()))
 		msg := field(1, s)
 		w.Header().Set("Content-Type", "application/grpc")
@@ -184,5 +185,7 @@ func statsAPI(t *testing.T, down func() int64) int {
 	srv.Config.Protocols.SetUnencryptedHTTP2(true)
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return srv.Listener.Addr().(*net.TCPAddr).Port
+	p := new(http.Protocols)
+	p.SetUnencryptedHTTP2(true)
+	return srv.Listener.Addr().(*net.TCPAddr).Port, &http.Client{Timeout: time.Second, Transport: &http.Transport{Protocols: p}}
 }

@@ -8,43 +8,47 @@ import (
 	"raydock/internal/node"
 )
 
-// decodeNode builds the backend core config connecting to n and decodes it for path lookups; n's outbound
+// decodeNode builds the config of a core connecting to n and decodes it for path lookups; n's outbound
 // is the first.
 func decodeNode(t *testing.T, n node.Node) map[string]any {
 	t.Helper()
-	b := testBackend
-	b.Chain = []*node.Node{&n}
-	data, err := BuildBackend(DefaultOptions(), b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return decodeJSON(t, data)
+	return decodeJSON(t, mustBuild(t, DefaultOptions(), Run{Chain: []*node.Node{&n}}))
 }
 
-// testNode is the node testBackend connects to.
+// testNode is the node testRun connects to.
 var testNode = node.Node{Protocol: node.Trojan, Host: "t.example.com", Port: 443, Password: "p", Security: "tls"}
 
-// testBackend connects to testNode and takes connections on 23457 (local port) and 23458 (TUN).
-var testBackend = Backend{Chain: []*node.Node{&testNode}, Mixed: 23457, TUN: 23458}
+// testRun connects to testNode.
+var testRun = Run{Chain: []*node.Node{&testNode}}
 
-// decodeMain builds the backend core config for o and decodes it for path lookups.
-func decodeMain(t *testing.T, o Options) map[string]any {
-	t.Helper()
-	data, err := BuildBackend(o, testBackend)
+// testLocal is the physical network of the tests under TUN.
+var testLocal = &Local{Interface: "WLAN", DNS: []string{"192.168.1.1"}}
+
+// testProxy is the tag of testRun's proxy outbound.
+var testProxy = proxyTag(testRun.Chain, nil)
+
+// proxyTag is the tag of the outbound reaching chain's final node, under TUN bound to local.
+func proxyTag(chain []*node.Node, local *Local) string {
+	_, tag, err := nodeOutbounds(chain, local)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	return decodeJSON(t, data)
+	return tag
 }
 
-// decodeFront builds the front core config for o, handing over to testBackend, and decodes it.
-func decodeFront(t *testing.T, o Options) map[string]any {
+// decodeMain builds the config of the core serving testRun with o, under TUN bound to testLocal, and
+// decodes it for path lookups.
+func decodeMain(t *testing.T, o Options) map[string]any {
 	t.Helper()
-	data, err := BuildFront(o, Front{Backend: testBackend, Gen: 1, APIPort: 23459})
-	if err != nil {
-		t.Fatal(err)
+	return decodeJSON(t, mustBuild(t, o, runFor(o)))
+}
+
+func runFor(o Options) Run {
+	r := testRun
+	if o.TUN.Enabled {
+		r.Local = testLocal
 	}
-	return decodeJSON(t, data)
+	return r
 }
 
 func rulesIn(m map[string]any) []map[string]any {
@@ -64,33 +68,10 @@ func decodeJSON(t *testing.T, data []byte) map[string]any {
 	return m
 }
 
-// at looks up a path like "a.b.0.c".
-func at(v any, path string) any {
-	for _, k := range strings.Split(path, ".") {
-		switch x := v.(type) {
-		case map[string]any:
-			v = x[k]
-		case []any:
-			i := 0
-			for _, ch := range k {
-				i = i*10 + int(ch-'0')
-			}
-			if i >= len(x) {
-				return nil
-			}
-			v = x[i]
-		default:
-			return nil
-		}
-	}
-	return v
-}
-
 func TestBuildVLESSReality(t *testing.T) {
 	m := decodeNode(t, node.Node{Protocol: node.VLESS, Host: "a.example.com", Port: 443, UUID: "u", Flow: "xtls-rprx-vision",
 		Security: "reality", SNI: "www.apple.com", PublicKey: "pk", ShortID: "ab"})
 	for path, want := range map[string]any{
-		"outbounds.0.tag":                                        tagProxy,
 		"outbounds.0.protocol":                                   "vless",
 		"outbounds.0.settings.vnext.0.users.0.flow":              "xtls-rprx-vision",
 		"outbounds.0.settings.vnext.0.users.0.encryption":        "none",
@@ -104,7 +85,7 @@ func TestBuildVLESSReality(t *testing.T) {
 			t.Errorf("%s = %v, want %v", path, got, want)
 		}
 	}
-	if _, err := BuildBackend(DefaultOptions(), Backend{Chain: []*node.Node{{Protocol: node.VLESS, Host: "h", Port: 1, UUID: "u", Security: "reality"}}, Mixed: 23457}); err == nil {
+	if _, err := Build(DefaultOptions(), Run{Chain: []*node.Node{{Protocol: node.VLESS, Host: "h", Port: 1, UUID: "u", Security: "reality"}}}); err == nil {
 		t.Error("REALITY without a public key should fail")
 	}
 }
@@ -217,7 +198,7 @@ func TestBuildMoreProtocols(t *testing.T) {
 	raw := node.Node{Protocol: node.MASQUE, Host: "m", Port: 443,
 		Outbound: `{"protocol":"masque","settings":{"address":"m","port":443},"streamSettings":{"network":"masque","security":"tls"}}`}
 	m = decodeNode(t, raw)
-	if at(m, "outbounds.0.tag") != tagProxy || at(m, "outbounds.0.streamSettings.network") != "masque" {
+	if at(m, "outbounds.0.tag") != proxyTag([]*node.Node{&raw}, nil) || at(m, "outbounds.0.streamSettings.network") != "masque" {
 		t.Errorf("masque %v", at(m, "outbounds.0"))
 	}
 }
@@ -318,7 +299,7 @@ func findRule(rules []map[string]any, key, value string) (int, string) {
 }
 
 func TestRoutingModes(t *testing.T) {
-	for mode, want := range map[string]string{ModeRule: tagProxy, ModeGlobal: tagProxy, ModeDirect: tagDirect} {
+	for mode, want := range map[string]string{ModeRule: testProxy, ModeGlobal: testProxy, ModeDirect: tagDirect} {
 		o := DefaultOptions()
 		o.Mode = mode
 		rules := rulesOf(t, o)
@@ -333,7 +314,7 @@ func TestRoutingModes(t *testing.T) {
 		if _, tag := findRule(rules, "inboundTag", tagDNS); tag != tagDirectDNS {
 			t.Errorf("%s mode: domestic DNS goes to %q", mode, tag)
 		}
-		remote := tagProxy
+		remote := testProxy
 		if mode == ModeDirect {
 			remote = tagDirectDNS
 		}
@@ -351,33 +332,20 @@ func TestCustomRules(t *testing.T) {
 	o.BlockAds = true
 	rules := rulesOf(t, o)
 	iProxy, tag := findRule(rules, "domain", "domain:openai.com")
-	if tag != tagProxy {
+	if tag != testProxy {
 		t.Errorf("openai.com goes to %q", tag)
 	}
-	if _, tag := findRule(rules, "domain", "geosite:netflix"); tag != tagProxy {
+	if _, tag := findRule(rules, "domain", "geosite:netflix"); tag != testProxy {
 		t.Errorf("geosite:netflix goes to %q", tag)
 	}
 	if _, tag := findRule(rules, "ip", "10.0.0.0/8"); tag != tagDirect {
 		t.Errorf("10.0.0.0/8 goes to %q", tag)
 	}
-	// Only the front core sees processes: it hands WeChat.exe's connections over as the direct user, which
-	// the backend core sends direct where the process rule stands.
-	iUser, tag := findRule(rules, "user", tagDirect)
-	if tag != tagDirect || iUser < iProxy {
-		t.Errorf("direct processes go to %q at %d", tag, iUser)
-	}
-	if i, _ := findRule(rules, "process", "WeChat.exe"); i >= 0 {
-		t.Error("the backend core cannot match processes")
-	}
-	front := rulesIn(decodeFront(t, o))
-	if i, tag := findRule(front, "process", "WeChat.exe"); tag != "f1/mixed-in-direct" || i != 0 {
-		t.Errorf("front: WeChat.exe goes to %q at %d", tag, i)
-	}
-	if _, tag := findRule(front, "inboundTag", "mixed-in-10818"); tag != "f1/mixed-in-direct" {
-		t.Errorf("front: the first rule of the local port goes to %q", tag)
-	}
-	if last := front[len(front)-1]; last["outboundTag"] != "f1/mixed-in-plain" || last["process"] != nil {
-		t.Errorf("front: the rest goes by %v", last)
+	// Process rules stand where their set does: after the proxy rules in rule mode. They match the
+	// connections of the local port and of the TUN alike.
+	iProc, tag := findRule(rules, "process", "WeChat.exe")
+	if tag != tagDirect || iProc < iProxy || !contains(rules[iProc]["process"], "steam.exe") || rules[iProc]["inboundTag"] != nil {
+		t.Errorf("direct processes go to %q at %d", tag, iProc)
 	}
 	iBlock, tag := findRule(rules, "domain", "keyword:tracker")
 	if tag != tagBlock || iBlock > iProxy {
@@ -397,7 +365,7 @@ func TestCustomRules(t *testing.T) {
 		t.Errorf("domestic DNS domains %v", at(m, "dns.servers.0.domains"))
 	}
 	o.ProxyRules = "bad rule"
-	if _, err := BuildBackend(o, testBackend); err == nil || !strings.Contains(err.Error(), "第 1 行") {
+	if _, err := Build(o, testRun); err == nil || !strings.Contains(err.Error(), "第 1 行") {
 		t.Errorf("a bad rule should report its line: %v", err)
 	}
 }
@@ -469,39 +437,37 @@ func TestDNS(t *testing.T) {
 	}
 }
 
+// Under TUN the core holds the TUN: DNS queries entering it go to the DNS module, which FakeDNS answers
+// first when on; QUIC entering it is blocked. Its own connections leave by the physical interface.
 func TestTUN(t *testing.T) {
 	o := DefaultOptions()
-	m, front := decodeMain(t, o), decodeFront(t, o)
-	if len(at(m, "inbounds").([]any)) != 1 || len(at(front, "inbounds").([]any)) != 1 || at(m, "fakedns") != nil {
-		t.Fatal("no TUN inbound or FakeDNS expected without TUN")
+	m := decodeMain(t, o)
+	if len(at(m, "inbounds").([]any)) != 1 || at(m, "fakedns") != nil {
+		t.Fatal("no TUN or FakeDNS expected without TUN")
 	}
-	o.TUN.Enabled, o.FakeDNS = true, true
-	m, front = decodeMain(t, o), decodeFront(t, o)
+	if _, err := Build(func() Options { o := o; o.TUN.Enabled = true; return o }(), testRun); err == nil {
+		t.Fatal("TUN needs the local network")
+	}
+	o.TUN.Enabled = true
+	m = decodeMain(t, o)
 	s := "inbounds.1.settings."
-	// The front core holds the TUN; it hands its connections to the backend core's second relay inbound,
-	// which sniffs them.
-	for path, want := range map[string]any{
-		"inbounds.1.protocol":          "tun",
-		"inbounds.1.sniffing":          nil,
-		s + "mtu":                      float64(1500),
-		s + "gateway.0":                tunGateway4,
-		s + "dns.0":                    tunDNS4,
-		s + "autoSystemRoutingTable.0": "0.0.0.0/0",
-		s + "autoSystemRoutingTable.1": nil,
-		s + "autoOutboundsInterface":   "auto",
-	} {
-		if got := at(front, path); got != want {
-			t.Errorf("front %s = %v, want %v", path, got, want)
-		}
-	}
 	for path, want := range map[string]any{
 		"inbounds.1.tag":                     tagTUN,
-		"inbounds.1.protocol":                "vless",
-		"inbounds.1.port":                    float64(23458),
-		"inbounds.1.sniffing.destOverride.3": "fakedns",
-		"fakedns.0.ipPool":                   fakePool4,
-		"fakedns.1":                          nil, // no IPv6 pool with IPv4 only
-		"dns.servers.0":                      "fakedns",
+		"inbounds.1.protocol":                "tun",
+		"inbounds.1.sniffing.destOverride.2": "quic",
+		"inbounds.1.sniffing.destOverride.3": nil,
+		"inbounds.1.sniffing.metadataOnly":   false,
+		s + "name":                           TUNNames[0],
+		s + "mtu":                            float64(1500),
+		s + "gateway.0":                      "172.19.0.1/30",
+		s + "dns.0":                          "172.19.0.2",
+		s + "autoSystemRoutingTable.0":       "0.0.0.0/1",
+		s + "autoSystemRoutingTable.1":       "128.0.0.0/1",
+		s + "autoSystemRoutingTable.2":       nil,
+		s + "autoOutboundsInterface":         "auto",
+		s + "autoSystemWfpBlockLeak.0":       "dns",
+		"fakedns":                            nil,
+		"dns.servers.0.address":              "192.168.1.1", // the node's resolver first
 		"outbounds.3.protocol":               "dns",
 	} {
 		if got := at(m, path); got != want {
@@ -509,74 +475,111 @@ func TestTUN(t *testing.T) {
 		}
 	}
 	rules := rulesOf(t, o)
-	if i, tag := findRule(rules, "outboundTag", tagDNSOut); i != 0 || tag != tagDNSOut || rules[0]["port"] != "53" {
+	if i, tag := findRule(rules, "outboundTag", tagDNSOut); i != 0 || tag != tagDNSOut || rules[0]["port"] != "53" || !contains(rules[0]["inboundTag"], tagTUN) {
 		t.Errorf("first rule should send TUN DNS queries to the DNS module: %v", rules[0])
 	}
-	frontRules := rulesIn(front)
-	if r := frontRules[0]; r["port"] != "53" || r["outboundTag"] != "f1/tun-in-plain" {
-		t.Errorf("the front core should hand TUN DNS queries over first: %v", r)
+	if i, tag := findRule(rules, "port", "443"); i != 1 || tag != tagBlock || rules[i]["network"] != "udp" || !contains(rules[i]["inboundTag"], tagTUN) {
+		t.Errorf("QUIC entering the TUN goes to %q at %d", tag, i)
 	}
-	// Only the user's own process: rules may make the core look up the process of each connection.
-	for _, r := range append(rules, frontRules...) {
+	// Only the user's own process rules: one may make the core look up the process of each connection.
+	for _, r := range rules {
 		if _, ok := r["process"]; ok {
 			t.Errorf("built-in process rule: %v", r)
 		}
 	}
-	if _, tag := findRule(frontRules, "port", "443"); tag != "f1/block" {
-		t.Errorf("QUIC goes to %q", tag)
+	direct := outboundsByTag(m)[tagDirect]
+	if at(direct, "streamSettings.sockopt.interface") != "WLAN" {
+		t.Errorf("direct outbound %v", direct)
 	}
-	o.TUN.IPv6, o.DNSStrategy, o.TUN.BlockQUIC = true, "UseIP", false
-	m, front = decodeMain(t, o), decodeFront(t, o)
-	if at(front, s+"autoSystemRoutingTable.1") != "::/0" || at(m, "fakedns.1.ipPool") != fakePool6 {
-		t.Errorf("IPv6：%v %v", at(front, s+"autoSystemRoutingTable"), at(m, "fakedns"))
+
+	// The other adapter, for the core starting beside this one, has its own name and addresses.
+	r := runFor(o)
+	r.Adapter = 1
+	m = decodeJSON(t, mustBuild(t, o, r))
+	for path, want := range map[string]any{
+		s + "name":      TUNNames[1],
+		s + "gateway.0": "172.19.0.5/30",
+		s + "dns.0":     "172.19.0.6",
+	} {
+		if got := at(m, path); got != want {
+			t.Errorf("adapter 1: %s = %v, want %v", path, got, want)
+		}
 	}
-	if i, _ := findRule(rulesIn(front), "port", "443"); i >= 0 {
+
+	o.FakeDNS, o.TUN.IPv6, o.DNSStrategy, o.TUN.BlockQUIC = true, true, "UseIP", false
+	m = decodeMain(t, o)
+	for path, want := range map[string]any{
+		"inbounds.1.sniffing.destOverride.3": "fakedns",
+		s + "gateway.1":                      "fdfe:dcba:9876::1/126",
+		s + "autoSystemRoutingTable.2":       "::/1",
+		s + "autoSystemRoutingTable.3":       "8000::/1",
+		"fakedns.0.ipPool":                   fakePool4,
+		"fakedns.1.ipPool":                   fakePool6,
+		"dns.servers.0":                      "fakedns",
+		"dns.servers.1.address":              "192.168.1.1",
+	} {
+		if got := at(m, path); got != want {
+			t.Errorf("%s = %v, want %v", path, got, want)
+		}
+	}
+	if i, _ := findRule(rulesIn(m), "port", "443"); i >= 0 {
 		t.Error("QUIC should not be blocked when off")
-	}
-	// Under TUN the backend core's own connections leave by the physical interface.
-	b := testBackend
-	b.Local = &Local{Interface: "WLAN", DNS: []string{"192.168.1.1"}}
-	data, err := BuildBackend(o, b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := at(decodeJSON(t, data), "outbounds.1.streamSettings.sockopt.interface"); got != "WLAN" {
-		t.Errorf("direct outbound bound to %v", got)
 	}
 }
 
+// Public listeners are exclusive: no unrelated SO_REUSEADDR socket may join them.
+func TestExclusiveListeners(t *testing.T) {
+	o := DefaultOptions()
+	r := testRun
+	r.Ports = []PortRoute{{20001, []*node.Node{&testNode}}}
+	m := decodeJSON(t, mustBuild(t, o, r))
+	for _, in := range []string{"inbounds.0", "inbounds.1"} {
+		so := at(m, in+".streamSettings.sockopt.customSockopt.0")
+		if Overlap != (so != nil) || so != nil && (at(so, "level") != "65535" || at(so, "opt") != "-5" || at(so, "value") != "1" || at(so, "network") != nil) {
+			t.Errorf("%s: %v", in, so)
+		}
+	}
+}
 func TestOptions(t *testing.T) {
 	o := DefaultOptions()
 	o.AllowLAN, o.LogLevel = true, "error"
 	m := decodeMain(t, o)
-	front := decodeFront(t, o)
-	if at(front, "inbounds.0.listen") != "0.0.0.0" || at(front, "inbounds.0.tag") != "mixed-in-10818-lan" || at(m, "log.loglevel") != "warning" {
-		t.Errorf("listen %v loglevel %v", at(front, "inbounds.0.listen"), at(m, "log.loglevel"))
+	// The local port takes SOCKS5 and HTTP, sniffing domains for the routing alone.
+	for path, want := range map[string]any{
+		"inbounds.0.tag":                tagMixed,
+		"inbounds.0.protocol":           "socks",
+		"inbounds.0.listen":             "0.0.0.0",
+		"inbounds.0.port":               float64(10818),
+		"inbounds.0.sniffing.routeOnly": true,
+		"log.loglevel":                  "warning",
+		"api":                           nil,
+		"stats":                         nil,
+	} {
+		if got := at(m, path); got != want {
+			t.Errorf("%s = %v, want %v", path, got, want)
+		}
 	}
-	// The backend core takes the front core's connections on loopback only.
-	if at(m, "inbounds.0.listen") != "127.0.0.1" || at(m, "inbounds.0.port") != float64(23457) || at(m, "inbounds.0.protocol") != "vless" {
-		t.Errorf("relay inbound %v", at(m, "inbounds.0"))
-	}
-	if at(m, "inbounds.0.settings.clients.0.id") != relayID || at(m, "inbounds.0.settings.decryption") != "none" {
-		t.Errorf("relay inbound %v", at(m, "inbounds.0"))
-	}
-	// The backend core reaches the node itself: its outbound is the proxy, the default.
-	if at(m, "outbounds.0.tag") != tagProxy || at(m, "outbounds.0.protocol") != "trojan" ||
+	// The core reaches the node itself: its outbound is the proxy, the default.
+	if at(m, "outbounds.0.tag") != testProxy || at(m, "outbounds.0.protocol") != "trojan" ||
 		at(m, "outbounds.0.settings.servers.0.address") != "t.example.com" {
 		t.Errorf("proxy outbound %v", at(m, "outbounds.0"))
 	}
+	// Its API is reached only through the authenticated tunnel.
+	o.APIPort, o.APIToken = 23459, "token"
+	m = decodeMain(t, o)
+	if at(m, "api.listen") != nil || at(m, "api.services.0") != "StatsService" || at(m, "api.services.1") != "HandlerService" {
+		t.Errorf("api %v", at(m, "api"))
+	}
+	if in := at(m, "inbounds.1").(map[string]any); in["tag"] != tagAPIAuth || in["listen"] != "127.0.0.1" ||
+		at(m, "inbounds.1.settings.accounts.0.pass") != "token" || at(m, "routing.rules.0.inboundTag.0") != tagAPIAuth {
+		t.Errorf("api inbound %v", in)
+	}
 	o.Port = 0
-	if _, err := BuildBackend(o, testBackend); err == nil {
+	if _, err := Build(o, testRun); err == nil {
 		t.Error("port 0 should fail")
 	}
-	if _, err := BuildFront(o, Front{Backend: testBackend, APIPort: 1}); err == nil {
-		t.Error("port 0 should fail in front too")
-	}
 	o.Port = 10818
-	if _, err := BuildBackend(o, Backend{Chain: testBackend.Chain}); err == nil {
-		t.Error("no relay port should fail")
-	}
-	if _, err := BuildBackend(o, Backend{Chain: []*node.Node{}, Mixed: 23457}); err == nil {
+	if _, err := Build(o, Run{Chain: []*node.Node{}}); err == nil {
 		t.Error("an empty chain should fail")
 	}
 }
@@ -723,7 +726,15 @@ func TestPlaintextToPublicAddress(t *testing.T) {
 		{node.Node{Protocol: node.VLESS, Host: "203.198.1.1", Port: 80, UUID: "u", Network: "ws"}, false},
 		{node.Node{Protocol: node.VLESS, Host: "support.zoom.us", Port: 80, UUID: "u", Network: "ws"}, false},
 		{node.Node{Protocol: node.Trojan, Host: "t.example.com", Port: 443, Password: "p"}, false},
+		// As Xray 26.10.29 ("xray run -test"): shared, benchmarking and documentation ranges are public.
+		{node.Node{Protocol: node.VLESS, Host: "100.64.1.1", Port: 80, UUID: "u"}, false},
+		{node.Node{Protocol: node.VLESS, Host: "198.18.0.1", Port: 80, UUID: "u"}, false},
+		{node.Node{Protocol: node.Trojan, Host: "203.0.113.5", Port: 80, Password: "p"}, false},
 		{node.Node{Protocol: node.VLESS, Host: "192.168.1.2", Port: 80, UUID: "u"}, true},
+		{node.Node{Protocol: node.VLESS, Host: "169.254.1.1", Port: 80, UUID: "u"}, true},
+		{node.Node{Protocol: node.VLESS, Host: "127.0.0.2", Port: 80, UUID: "u"}, true},
+		{node.Node{Protocol: node.VLESS, Host: "[fd00::1]", Port: 80, UUID: "u"}, true},
+		{node.Node{Protocol: node.VLESS, Host: "::ffff:10.0.0.1", Port: 80, UUID: "u"}, true},
 		{node.Node{Protocol: node.VLESS, Host: "router.lan", Port: 80, UUID: "u"}, true},
 		{node.Node{Protocol: node.Trojan, Host: "nas", Port: 443, Password: "p"}, true},
 		{node.Node{Protocol: node.VLESS, Host: "v.example.com", Port: 443, UUID: "u", Security: "tls"}, true},

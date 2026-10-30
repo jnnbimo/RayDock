@@ -111,9 +111,9 @@ func (a *App) geoDone(tag, previous string, err error) {
 		a.QueueLog("[RayDock] 已更新规则数据 " + tag)
 	}
 	if a.WaitCore {
-		a.Connect(a.ActiveID, nil)
+		a.resumeConnect(change{geo: updated})
 	} else if updated {
-		a.RenewCores()
+		a.RenewCores(change{geo: true})
 	}
 	a.SyncCores()
 	a.PinCertificates()

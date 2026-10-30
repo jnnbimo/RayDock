@@ -47,7 +47,7 @@ func TestIntegrationDNSResolverRoles(t *testing.T) {
 					o.Port, o.Mode, o.DomainStrategy = freePort(t), mode, "IPOnDemand"
 					o.DirectDNS, o.RemoteDNS = directAddr, remote.LocalAddr().String()
 					n := node.Node{Protocol: node.SOCKS, Host: "127.0.0.1", Port: port}
-					startConnection(t, exe, t.TempDir(), "dns", o, Backend{Chain: []*node.Node{&n}}, nil)
+					startConnection(t, exe, t.TempDir(), "dns", o, Run{Chain: []*node.Node{&n}}, nil)
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 					defer cancel()
 					done := make(chan struct{})
@@ -88,7 +88,7 @@ func TestIntegrationLoopbackResolverWithLAN(t *testing.T) {
 			o.Port, o.Mode, o.DomainStrategy, o.AllowLAN = freePort(t), ModeDirect, "IPOnDemand", lan
 			o.DirectDNS, o.RemoteDNS = resolver.LocalAddr().String(), resolver.LocalAddr().String()
 			n := node.Node{Protocol: node.SOCKS, Host: "127.0.0.1", Port: freePort(t)}
-			startConnection(t, exe, t.TempDir(), "dns", o, Backend{Chain: []*node.Node{&n}}, nil)
+			startConnection(t, exe, t.TempDir(), "dns", o, Run{Chain: []*node.Node{&n}}, nil)
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			done := make(chan struct{})

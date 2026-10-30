@@ -12,20 +12,12 @@ var ShortErr = shortErr
 func (a *App) Pinning(id string) bool { return a.pinning[id] }
 
 // DescribePorts is how the log names the dedicated ports.
-func (a *App) DescribePorts() string { return a.describePorts(a.portRoutes()) }
+func (a *App) DescribePorts() string { return a.describePorts(a.portRoutes(a.State.Settings.Port)) }
 
-// BackendConfig is the config of the backend core planned, nil when the cores do not run.
-func (a *App) BackendConfig() []byte {
-	if a.planned == nil {
-		return nil
+// CoreConfig is the config of the core planned, on the first adapter; nil without one.
+func (a *App) CoreConfig() []byte {
+	if r := a.planned.core(); r != nil {
+		return r.cfg
 	}
-	return a.planned.run.cfg
-}
-
-// FrontConfig is the config of the front core planned, nil when the cores do not run.
-func (a *App) FrontConfig() []byte {
-	if a.planned == nil {
-		return nil
-	}
-	return a.planned.front.cfg
+	return nil
 }

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -16,8 +17,8 @@ import (
 	"raydock/internal/xray"
 )
 
-// Private addresses, which the routing sends direct, are reached through the local port: Xray's freedom
-// would refuse them behind the backend core's VLESS relay inbound. Open to the LAN, loopback is refused.
+// Private addresses, which the routing sends direct, are reached through the local port. Open to the LAN,
+// loopback is refused.
 func TestIntegrationPrivateDirect(t *testing.T) {
 	root := os.Getenv("RAYDOCK_CORE_DIR")
 	if root == "" {
@@ -30,8 +31,8 @@ func TestIntegrationPrivateDirect(t *testing.T) {
 	a.ReadCoreVersion = xray.Version
 	server, _ := freePort()
 	core := xray.Core{}
-	if err := core.Start(filepath.Join(a.CoreDir(), xray.ExeName()), filepath.Join(t.TempDir(), "server.json"), fmt.Appendf(nil,
-		`{"inbounds":[{"listen":"127.0.0.1","port":%d,"protocol":"socks"}],"outbounds":[{"protocol":"freedom"}]}`, server)); err != nil {
+	if err := core.Start(context.Background(), filepath.Join(a.CoreDir(), xray.ExeName()), filepath.Join(t.TempDir(), "server.json"), fmt.Appendf(nil,
+		`{"inbounds":[{"listen":"127.0.0.1","port":%d,"protocol":"socks"}],"outbounds":[{"protocol":"freedom"}]}`, server), nil); err != nil {
 		t.Fatal(err)
 	}
 	defer core.Stop()
@@ -71,9 +72,9 @@ func TestIntegrationPrivateDirect(t *testing.T) {
 	a.State.Settings.AllowLAN = true
 	a.SettingChanged()
 	a.Reconnect()
-	waitOperation(t, a.coreDo(func() {})) // the new backend core has taken over
+	waitOperation(t, a.coreDo(func() {})) // the core restarted
 	drainRegression(posts)
-	if !a.run.opts.AllowLAN || a.SettingsDirty {
+	if !a.running.opts.AllowLAN || a.SettingsDirty {
 		t.Fatal("the LAN setting was not applied")
 	}
 	if body, err := get(); err == nil {

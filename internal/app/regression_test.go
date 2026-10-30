@@ -67,19 +67,17 @@ func drainRegression(posts chan func()) {
 	}
 }
 
-// coresRunning reports whether any core of the connection runs.
+// coresRunning reports whether a core of the connection runs.
 func coresRunning(a *App) bool {
 	a.procs.mu.Lock()
 	defer a.procs.mu.Unlock()
-	return a.front.Running() || slices.ContainsFunc(a.procs.cores, (*xray.Core).Running)
+	return slices.ContainsFunc(a.procs.cores, (*xray.Core).Running)
 }
 
-// coreConfigWritten reports a config written for a core of the connection, as starting one does.
+// coreConfigWritten reports a config written for the core, as starting one does.
 func coreConfigWritten(a *App) error {
-	for _, path := range []string{a.configPath(), filepath.Join(a.DataDir, "front.json")} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			return fmt.Errorf("%s: %v", filepath.Base(path), err)
-		}
+	if _, err := os.Stat(a.configPath()); !os.IsNotExist(err) {
+		return fmt.Errorf("%s: %v", filepath.Base(a.configPath()), err)
 	}
 	return nil
 }
@@ -180,9 +178,8 @@ func TestCoreUpdateDownloadRoute(t *testing.T) {
 	}
 }
 
-// Replacing the core while connected touches no core of the connection: the files are replaced under the
-// running cores, then a new backend core starts from them beside the old one (RenewCores). The system
-// proxy stays; only tests wait.
+// Replacing the core while connected keeps the connection: the files are replaced under the running core,
+// then it restarts from them (RenewCores), on the same node, the system proxy kept; only tests wait.
 func TestCoreReplacementKeepsConnection(t *testing.T) {
 	a, posts, p := newRegressionApp(t)
 	placeholderCore(t, a)
@@ -192,23 +189,26 @@ func TestCoreReplacementKeepsConnection(t *testing.T) {
 	release := runningFake(t, a, id)
 	defer release()
 	a.SyncProxy()
-	applied, seq, backend := p.cur, a.connSeq, a.run.core
+	applied, running, since := p.cur, a.planned, a.Since
 	src := coreFilesIn(t, "new")
 	a.coreJob("install", "安装", func(*http.Client) (string, error) { return src, nil })
 	waitRegression(t, posts, func() bool { return a.coreHold })
 	if a.TestLatency([]string{id}) == nil {
 		t.Fatal("a test started on files being replaced")
 	}
+	if a.planned != running || a.Conn != StateOn {
+		t.Fatal("the core restarted before its files were replaced")
+	}
 	release()
 	waitRegression(t, posts, func() bool { return !a.CoreBusy })
 	if b, _ := os.ReadFile(a.coreExe()); string(b) != "new" || a.CoreErr != "" {
 		t.Fatalf("core %q error %q", b, a.CoreErr)
 	}
-	if a.Conn != StateOn || a.connSeq != seq || a.ActiveID != id || p.cur != applied || a.State.ProxyBackup == nil {
-		t.Fatalf("the connection was touched: state %v seq %d→%d proxy %+v", a.Conn, seq, a.connSeq, p.cur)
+	if a.ActiveID != id || p.cur != applied || a.State.ProxyBackup == nil {
+		t.Fatalf("the connection was touched: state %v proxy %+v", a.Conn, p.cur)
 	}
-	if a.run.core == backend {
-		t.Fatal("the connection should move to a new backend core")
+	if a.planned == running || a.planned.id != id || a.planned.switched || a.Since != since {
+		t.Fatalf("the core should restart for the same connection: %+v", a.planned)
 	}
 }
 
@@ -220,15 +220,11 @@ func TestNodeChangeWhileConnecting(t *testing.T) {
 	a.ImportLinks("socks://127.0.0.1:9#a\nsocks://127.0.0.1:10#b", "")
 	id, other := a.State.Nodes[0].ID, a.State.Nodes[1].ID
 	chain, _ := a.Chain(a.NodeByID(id))
-	b, err := a.backendFor(chain, a.xrayOptions())
+	start, err := a.planTarget(coreSpec{opts: a.xrayOptions(), run: xray.Run{Chain: copyChain(chain)}}, change{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := newBackend(a.xrayOptions(), b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := &coreTarget{id: id, run: run}
+	start.id, start.opts = id, a.xrayOptions()
 	a.Conn, a.ActiveID, a.planned = StateConnecting, id, start
 	seq := a.connSeq
 	n := *a.NodeByID(other)
@@ -243,40 +239,38 @@ func TestNodeChangeWhileConnecting(t *testing.T) {
 	}
 }
 
-// runningFake makes a look connected to node id with its cores, as a start leaves it, without processes;
-// core operations wait until the returned func is called.
+// runningFake makes a look connected to node id through its core, as a start leaves it, without a
+// process but with core files, which a restart needs; core operations wait until the returned func is
+// called.
 func runningFake(t *testing.T, a *App, id string) (release func()) {
 	t.Helper()
+	if !a.CoreReady() {
+		placeholderCore(t, a)
+	}
 	chain, err := a.Chain(a.NodeByID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
 	opts := a.xrayOptions()
-	b, err := a.backendFor(chain, opts)
+	local, err := a.tunLocal(opts)
+	if err != nil {
+		t.Skip("no physical network for TUN: ", err)
+	}
+	plan, err := a.planTarget(coreSpec{opts: opts, run: xray.Run{Chain: copyChain(chain), Local: local}}, change{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := newBackend(opts, b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run.core = a.newCore()
-	f := xray.Front{Backend: run.b, Gen: 1, APIPort: 10000}
-	cfg, err := xray.BuildFront(opts, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.Conn, a.ActiveID, a.runningPort = StateOn, id, opts.Port
+	plan.proc.core = a.newCore()
+	plan.id, plan.opts, plan.seq, plan.connSeq, plan.ctx, plan.fresh, plan.switched = id, opts, a.coreSeq, a.connSeq, a.coreCtx, true, true
+	a.Conn, a.ActiveID, a.runningPort, a.Since = StateOn, id, opts.Port, time.Now()
 	a.connCtx, a.connCancel = context.WithCancel(a.workCtx)
-	a.run, a.frontRun = run, &frontCore{cfg: cfg, f: f}
-	a.planned = &coreTarget{seq: a.pairSeq, connSeq: a.connSeq, id: id, run: run, front: a.frontRun, drain: true, ctx: a.pairCtx, drains: a.drainCtx}
+	a.planned, a.running = plan, plan
 	gate := make(chan struct{})
 	a.coreDo(func() { <-gate })
 	return sync.OnceFunc(func() { close(gate) })
 }
 
-// Turning the TUN on or off while connected restarts the cores: the TUN comes and goes with the front
-// core, and the backend core needs a relay inbound for it. Neither may end in a config error.
+// Turning the TUN on or off while connected restarts the core with it. Neither may end in a config error.
 func TestTUNToggleRestarts(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		a, _, _ := newRegressionApp(t)
@@ -291,38 +285,37 @@ func TestTUNToggleRestarts(t *testing.T) {
 		a.State.Settings.TUN.Enabled = on
 		a.SettingChanged()
 		a.Reconnect()
-		if a.ConnErr != "" || a.Conn != StateConnecting || a.connSeq == seq {
+		if a.ConnErr != "" || a.Conn != StateConnecting || a.connSeq == seq || a.planned.opts.TUN.Enabled != on ||
+			a.planned.core().tun() != on || a.planned.switched {
 			t.Fatalf("TUN %v: state %v err %q, restarted %v", on, a.Conn, a.ConnErr, a.connSeq != seq)
 		}
 		a.Disconnect()
 	}
 }
 
-// What changes the connection's node or chain (its node or chain edited, a subscription update, a pinned
-// certificate) applies at once on a new backend core beside the running one; the routing mode is switched
-// into the running backend core, the front core going on throughout. Settings the backend core reads at
-// start only stay pending until a reconnect.
-func TestChangesApplyInPlace(t *testing.T) {
+// Every change of what the core serves (another node, its node or chain edited, the routing
+// mode, the settings applied, new rule data) restarts it: the connection goes on, on the same node unless
+// switched, connected since it was made. A change of nothing it serves (a name) restarts nothing. Settings
+// the change does not apply stay pending until a reconnect.
+func TestChangesRestartCore(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
+	placeholderCore(t, a)
 	a.ImportLinks("socks://127.0.0.1:9#a", "")
 	relay, _ := a.AddGroup(GroupInput{Name: "relay"})
 	a.ImportLinks("socks://127.0.0.1:10#front", relay)
 	id, front, home := a.State.Nodes[0].ID, a.State.Nodes[1].ID, a.State.Groups[0].ID
 	release := runningFake(t, a, id)
 	defer release()
-	seq, backend, gen := a.connSeq, a.run.core, a.frontRun.f.Gen
-	inPlace := func(what string, newBackend bool, switches int) {
+	plan := a.planned
+	restarted := func(what string, want bool) {
 		t.Helper()
-		if a.Conn != StateOn || a.connSeq != seq || a.run.switches != switches || a.ConnErr != "" {
-			t.Fatalf("%s: state %v seq %d→%d switches %d err %q", what, a.Conn, seq, a.connSeq, a.run.switches, a.ConnErr)
+		if got := a.planned.core() != plan.core(); got != want || a.ConnErr != "" {
+			t.Fatalf("%s: restarted %v, err %q", what, got, a.ConnErr)
 		}
-		if (a.run.core != backend) != newBackend || (a.frontRun.f.Gen != gen) != newBackend {
-			t.Fatalf("%s: new backend core %v, front switched %v", what, a.run.core != backend, a.frontRun.f.Gen != gen)
+		if want && (a.Conn != StateConnecting || a.connCore() != nil || a.planned.id != a.ActiveID || a.planned.fresh) {
+			t.Fatalf("%s: state %v target %+v", what, a.Conn, a.planned)
 		}
-		if a.planned.run.core != a.run.core || a.planned.id != a.ActiveID {
-			t.Fatalf("%s: target %+v", what, a.planned)
-		}
-		backend, gen = a.run.core, a.frontRun.f.Gen
+		plan = a.planned
 	}
 
 	n := *a.NodeByID(id)
@@ -330,58 +323,92 @@ func TestChangesApplyInPlace(t *testing.T) {
 	if err := a.EditNode(n); err != nil {
 		t.Fatal(err)
 	}
-	inPlace("a rename", false, 0)
+	restarted("a rename", false)
 	n.Port = 19
 	if err := a.EditNode(n); err != nil {
 		t.Fatal(err)
 	}
-	inPlace("an edit", true, 0)
-	if !a.planned.drain {
-		t.Fatal("an edit ends no connection")
+	restarted("an edit", true)
+	if a.planned.switched {
+		t.Fatal("an edit keeps the connection's time")
 	}
 	if err := a.EditGroup(home, GroupInput{Name: "home", Front: front}); err != nil {
 		t.Fatal(err)
 	}
-	inPlace("a front proxy", true, 0)
+	restarted("a front proxy", true)
 
 	a.State.Settings.Port++
 	a.SettingChanged()
-	if !a.SettingsDirty {
-		t.Fatal("a new port needs a restart")
-	}
 	a.SetMode(xray.ModeGlobal)
-	inPlace("a mode", false, 1)
-	if a.run.opts.Mode != xray.ModeGlobal || a.run.opts.Port == a.State.Settings.Port || !a.SettingsDirty {
-		t.Fatalf("the mode alone switches: %+v dirty %v", a.run.opts, a.SettingsDirty)
+	restarted("a mode", true)
+	if o := a.planned.opts; o.Mode != xray.ModeGlobal || o.Port == a.State.Settings.Port {
+		t.Fatalf("the mode alone applies: %+v", o)
 	}
-	a.Connect(front, nil) // another node: the old backend core stops at once
-	inPlace("another node", true, 0)
-	if a.ActiveID != front || a.run.opts.Port == a.State.Settings.Port || !a.SettingsDirty || a.planned.drain {
-		t.Fatalf("another node switches alone: %s %+v dirty %v drain %v", a.ActiveID, a.run.opts, a.SettingsDirty, a.planned.drain)
+	a.Connect(front, nil) // another node, with the settings that run
+	restarted("another node", true)
+	if a.ActiveID != front || a.planned.opts.Port == a.State.Settings.Port || !a.planned.switched {
+		t.Fatalf("another node alone: %s %+v", a.ActiveID, a.planned)
 	}
 	a.Connect(id, nil)
-	inPlace("back", true, 0)
-	// Reconnecting applies the new port too, in the front core, which opens it beside the old one.
-	a.Reconnect()
-	if a.run.core != backend || a.frontRun.f.Gen != gen+1 || a.run.opts.Port != a.State.Settings.Port || a.SettingsDirty {
-		t.Fatalf("port: front %+v opts %+v dirty %v", a.frontRun.f, a.run.opts, a.SettingsDirty)
-	}
-	gen = a.frontRun.f.Gen
-	// The targets carried out (on fakes, which change nothing), a cut asked for before is no longer pending.
-	release()
-	waitOperation(t, a.coreDo(func() {}))
-	// New rule data: a new backend core, beside the old one, which finishes its connections.
-	a.RenewCores()
-	inPlace("new rule data", true, 0)
-	if !a.planned.drain {
-		t.Fatal("new rule data ends no connection")
+	restarted("back", true)
+	a.Reconnect() // applies the settings pending
+	restarted("reconnect", true)
+	if a.planned.opts.Port != a.State.Settings.Port {
+		t.Fatalf("reconnecting applies the new port: %+v", a.planned.opts)
 	}
 	a.Connect(id, nil) // nothing changed
-	inPlace("no change", false, 0)
+	restarted("no change", false)
+	a.RenewCores(change{geo: true}) // new rule data: the same config, a new core
+	restarted("new rule data", true)
 	if len(posts) != 0 {
 		t.Fatalf("%d results posted before any core operation ran", len(posts))
 	}
 }
+
+// Under TUN the core serves the dedicated ports too: their chains' first hops are bound to the physical
+// interface, as the connection's is, and their names resolved by its DNS servers. Another node or another
+// dedicated port restarts it.
+func TestSwitchUnderTUN(t *testing.T) {
+	a, _, _ := newRegressionApp(t)
+	a.Elevated = true
+	placeholderCore(t, a)
+	a.CoreVersion = xray.MinTUNVersion
+	a.State.Settings.TUN.Enabled = true
+	a.ImportLinks("socks://a.example.com:1080#a\nsocks://B.example.com:1080#b\nsocks://c.example.com:1080#c", "")
+	id, other, third := a.State.Nodes[0].ID, a.State.Nodes[1].ID, a.State.Nodes[2].ID
+	port, _ := freePort()
+	if err := a.SetNodePort(third, port); err != nil {
+		t.Fatal(err)
+	}
+	release := runningFake(t, a, id)
+	defer release()
+	plan := a.planned
+	if !plan.core().tun() || len(plan.core().run.Ports) != 1 || plan.core().run.Local == nil {
+		t.Fatalf("core %+v", plan.core())
+	}
+	a.Connect(other, nil)
+	if a.ConnErr != "" || a.planned.core() == plan.core() {
+		t.Fatalf("another node: err %q", a.ConnErr)
+	}
+	plan = a.planned
+	commitFake(a, plan)
+	if err := a.SetNodePort(id, port+1); err != nil {
+		t.Fatal(err)
+	}
+	if a.planned.core() == plan.core() || a.Conn != StateConnecting {
+		t.Fatalf("a dedicated port should restart the core: %v", a.Conn)
+	}
+	cfg := string(a.planned.core().cfg)
+	for _, want := range []string{"full:a.example.com", "full:b.example.com", "full:c.example.com"} {
+		if !strings.Contains(cfg, want) {
+			t.Fatalf("no %s: the first hops are resolved by the local DNS: %s", want, cfg)
+		}
+	}
+	if strings.Count(cfg, `"interface": "`) < 4 { // three first hops, direct
+		t.Fatalf("the first hops are bound to the physical interface: %s", cfg)
+	}
+}
+
 func TestCoreUpdateDisconnectCancelsResume(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
 	placeholderCore(t, a)
@@ -638,17 +665,70 @@ func TestQueuedConnectionsCancelBeforeSideEffects(t *testing.T) {
 }
 func TestConnectionExitGeneration(t *testing.T) {
 	a, _, _ := newRegressionApp(t)
+	old, cur := &runningCore{core: a.newCore()}, &runningCore{core: a.newCore()}
 	a.Conn = StateConnecting
-	a.pairSeq = 2
-	a.pairExited(1, errors.New("old exit"))
-	if a.Conn != StateConnecting {
+	a.planned = &coreTarget{proc: cur}
+	a.live.Store(cur)
+	a.coreExited(old, errors.New("old exit"))
+	if a.Conn != StateConnecting || old.exited {
 		t.Fatal("old process exit invalidated new connection")
 	}
-	a.pairExited(2, errors.New("current exit"))
-	if a.Conn != StateOff || a.pairSeq == 2 || a.ConnErr != "current exit" {
+	a.coreExited(cur, errors.New("current exit"))
+	if a.Conn != StateOff || a.ConnErr != "current exit" || !cur.exited {
 		t.Fatal("exit before success was lost")
 	}
 }
+
+// An old core may exit while the replacement is still starting: that exit must not cancel its start.
+func TestOldCoreExitDuringHandover(t *testing.T) {
+	a, _, _ := newRegressionApp(t)
+	old, next := &runningCore{core: a.newCore()}, &runningCore{core: a.newCore()}
+	a.Conn = StateConnecting
+	a.planned = &coreTarget{proc: next}
+	a.live.Store(old)
+	a.coreExited(old, errors.New("old exit"))
+	if a.Conn != StateConnecting || a.ConnErr != "" || !old.exited || a.planned.proc != next {
+		t.Fatal("the old core's exit cancelled its replacement")
+	}
+}
+
+// The core serving the dedicated ports alone restarts when it exits, unless it ran only briefly, after
+// which the next change starts it again.
+func TestPortsCoreExit(t *testing.T) {
+	a, _, _ := newRegressionApp(t)
+	placeholderCore(t, a)
+	a.ImportLinks("socks://127.0.0.1:9#a", "")
+	gate := make(chan struct{})
+	defer close(gate)
+	a.coreDo(func() { <-gate })
+	port, _ := freePort()
+	if err := a.SetNodePort(a.State.Nodes[0].ID, port); err != nil {
+		t.Fatal(err)
+	}
+	commit := func() *runningCore {
+		liveFake(a, a.planned)
+		a.running = a.planned
+		return a.planned.core()
+	}
+	ports := commit()
+	ports.since = time.Now()
+	a.coreExited(ports, errors.New("crash"))
+	if a.planned.core() != ports || !strings.Contains(a.PortErrs[a.State.Nodes[0].ID], "crash") {
+		t.Fatalf("a brief core: errors %v", a.PortErrs)
+	}
+	a.SyncCores() // the next change
+	again := a.planned.core()
+	if again == ports || again == nil {
+		t.Fatal("the next change should start the core again")
+	}
+	commit()
+	again.since = time.Now().Add(-2 * portsRestartAfter)
+	a.coreExited(again, errors.New("crash"))
+	if p := a.planned.core(); p == again || p == nil || a.Conn != StateOff {
+		t.Fatal("a core that ran a while restarts at once")
+	}
+}
+
 func TestMalformedOutboundReturnsError(t *testing.T) {
 	a, _, _ := newRegressionApp(t)
 	a.ImportLinks("socks://a.example:1080#a", "")

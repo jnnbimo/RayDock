@@ -1,10 +1,11 @@
 package xray
 
 import (
-	"golang.org/x/sys/windows"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestCopyCoreRollbackLockedDestination(t *testing.T) {

@@ -235,7 +235,7 @@ func (a *View) banners(c *ui.Context) {
 	}
 	if a.SettingsDirty && a.Conn == app.StateOn {
 		a.banner(c, p.warning, func() {
-			ui.Text(c, "设置已修改，尚未应用到当前连接").FontSize(12).TextColor(p.warning)
+			ui.Text(c, "设置已修改，应用时会重新连接，已建立的连接将断开").FontSize(12).TextColor(p.warning)
 			if button(c, "应用").Height(bannerButton).Padding(0, 10).FontSize(12).Clicked() {
 				a.Reconnect()
 			}
@@ -329,7 +329,7 @@ func (a *View) adminDialog(c *ui.Context) {
 	p := a.pal
 	a.dialog(c, &a.AdminPrompt, dialog{width: 460, title: "TUN 模式需要管理员权限", icon: icShield, tone: p.warning, err: &a.adminErr,
 		body: func() {
-			ui.Text(c, "TUN 模式需要创建虚拟网卡 "+xray.TUNName+" 并修改系统路由，Windows 只允许管理员进行这些操作。").FontSize(13).TextColor(p.muted).LineHeight(1.5)
+			ui.Text(c, "TUN 模式需要创建虚拟网卡 "+xray.TUNNames[0]+" 并修改系统路由，Windows 只允许管理员进行这些操作。").FontSize(13).TextColor(p.muted).LineHeight(1.5)
 			ui.Text(c, "重新启动后会自动连接所选节点。").FontSize(13).TextColor(p.muted)
 		},
 		start: func() {

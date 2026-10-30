@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,27 +13,44 @@ import (
 	"raydock/internal/xray"
 )
 
-// connectedFake connects the first node as runningFake does, with the cores committed: checks may run
+// Test fixtures must not wait on or reuse an adapter of a real RayDock running on the developer's PC.
+// These tests use placeholder executables; the opt-in elevated adapter tests live in package xray.
+func TestMain(m *testing.M) {
+	xray.TUNNames = [2]string{fmt.Sprintf("RayDockTest-%d-A", os.Getpid()), fmt.Sprintf("RayDockTest-%d-B", os.Getpid())}
+	os.Exit(m.Run())
+}
+
+// connectedFake connects the first node as runningFake does, with the core committed: checks may run
 // through its local port, where nothing listens, so they fail fast without external traffic.
 func connectedFake(t *testing.T, a *App) {
 	t.Helper()
 	a.ImportLinks("trojan://p@127.0.0.1:1#n", "")
 	a.State.Settings.Port, _ = freePort()
 	t.Cleanup(runningFake(t, a, a.State.Nodes[0].ID))
-	a.live.Store(a.planned)
+	liveFake(a, a.planned)
 }
 
-// Re-planning that changes nothing the connection runs (a pin, a subscription, a dedicated port) replaces
-// a.run but not its core: the end-to-end test in flight still reports. A test overtaken by another node ends
-// without a result rather than testing forever.
+// commitFake makes start t of the connection's core done, as its process started, without it.
+func commitFake(a *App, t *coreTarget) {
+	liveFake(a, t)
+	a.running = t
+	a.started(t, nil)
+}
+
+// liveFake publishes the core of t as running.
+func liveFake(a *App, t *coreTarget) { a.live.Store(t.proc) }
+
+// A plan that changes nothing the connection runs (a pin, a subscription, a dedicated port of nothing)
+// leaves the core: the end-to-end test in flight still reports. A test overtaken by a restart ends without
+// a result rather than testing forever.
 func TestRealTestOutlivesReplanning(t *testing.T) {
 	a, posts, _ := newRegressionApp(t)
 	connectedFake(t, a)
-	run := a.run
+	plan := a.planned
 	a.TestReal()
 	a.SyncCores()
-	if a.run == run || a.run.core != run.core {
-		t.Fatal("the no-op plan should replace a.run and keep its core")
+	if a.planned != plan || a.Conn != StateOn {
+		t.Fatal("the no-op plan should leave the core")
 	}
 	waitRegression(t, posts, func() bool { return !a.RealTest.Testing })
 	if a.RealTest.Err == "" {
@@ -40,16 +58,14 @@ func TestRealTestOutlivesReplanning(t *testing.T) {
 	}
 
 	a.TestReal()
-	a.run = &runningCore{core: a.newCore(), cfg: a.run.cfg, opts: a.run.opts, b: a.run.b} // another backend core
+	a.SetMode(xray.ModeGlobal) // a restart
 	waitRegression(t, posts, func() bool { return !a.RealTest.Testing })
 	if a.RealTest != (Latency{}) {
-		t.Fatalf("a result of replaced cores must not show: %+v", a.RealTest)
+		t.Fatalf("a result of the core replaced must not show: %+v", a.RealTest)
 	}
 
-	// The replacement has now committed; only the latest test sets its result.
-	next := *a.live.Load()
-	next.run = a.run
-	a.live.Store(&next)
+	// The restart has now committed; only the latest test sets its result.
+	commitFake(a, a.planned)
 	a.TestReal()
 	a.TestReal()
 	waitRegression(t, posts, func() bool { return !a.RealTest.Testing })

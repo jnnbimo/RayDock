@@ -15,16 +15,14 @@ import (
 	"time"
 )
 
-// readyTimeout bounds the wait for the ready line. A process still running after it counts as started,
-// so a reworded log line cannot block connecting.
-const readyTimeout = 5 * time.Second
+// readyTimeout bounds the wait for the ready line. A live process alone is not ready: its TUN may still
+// be configuring routes. A replacement must not retire the old core until this one reports ready.
+const readyTimeout = 20 * time.Second
 
 // Core manages one xray process. Its methods may be called from any goroutine.
 type Core struct {
 	// OnLog receives each output line, on the goroutine reading the output.
 	OnLog func(line string)
-	// OnExit is called when the core exits unexpectedly (not after Stop).
-	OnExit func(err error)
 
 	// run makes Start and Stop take turns: a Stop during a Start waits for it and ends what it started,
 	// so a port the core is about to take is free once Stop returns.
@@ -36,15 +34,19 @@ type Core struct {
 }
 
 // Start writes the config and starts the core, stopping a running one first. It returns once the core
-// reports ready, exits or times out.
-func (c *Core) Start(exe, configPath string, config []byte) error {
-	return c.StartWithExit(exe, configPath, config, c.OnExit)
+// reports ready, or fails on exit, timeout or the end of ctx, which stops the process it started. ctx
+// bounds the startup only: it never stops a core that started. onExit, if not nil, is called when this
+// process exits unexpectedly, not after Stop nor after a failed start.
+func (c *Core) Start(ctx context.Context, exe, configPath string, config []byte, onExit func(error)) error {
+	return c.start(ctx, exe, configPath, config, onExit, readyTimeout)
 }
 
-// StartWithExit binds an exit handler to this process, not a later replacement.
-func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(error)) error {
+func (c *Core) start(ctx context.Context, exe, configPath string, config []byte, onExit func(error), timeout time.Duration) error {
 	c.run.Lock()
 	defer c.run.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.stop()
 	if _, err := os.Stat(exe); err != nil {
 		return fmt.Errorf("找不到 Xray 核心：%s", exe)
@@ -60,15 +62,19 @@ func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(
 	cmd.Dir = filepath.Dir(exe)
 	cmd.Env = assetEnv(exe)
 	hideWindow(cmd)
-	stdout, err := cmd.StdoutPipe()
+	// Own the pipe: Cmd.Wait closes StdoutPipe before a concurrent scanner necessarily consumed the
+	// final error lines. Startup failure must include the full output, not just the startup banner.
+	stdout, writer, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	cmd.Stderr = cmd.Stdout // one pipe keeps the log order
-
+	cmd.Stdout, cmd.Stderr = writer, writer // one pipe keeps the log order
 	if err := cmd.Start(); err != nil {
+		writer.Close()
+		stdout.Close()
 		return fmt.Errorf("启动核心失败：%w", err)
 	}
+	writer.Close()                         // only the child keeps the writing end
 	newProcessGuard().add(cmd.Process.Pid) // ends the core with this process
 	c.mu.Lock()
 	done := make(chan struct{})
@@ -78,18 +84,24 @@ func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(
 	ready := make(chan struct{})
 	var launched atomic.Bool // Start reported success; any later exit is unexpected
 	var once sync.Once
-	var startup strings.Builder // startup output, used as the error on failure
+	var startup string // bounded tail of startup output, including the failure's final error
 	var startupMu sync.Mutex
+	logged := make(chan struct{})
 	go func() {
+		defer close(logged)
+		defer stdout.Close()
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 64*1024), 1024*1024)
 		for sc.Scan() {
 			line := sc.Text()
-			startupMu.Lock()
-			if startup.Len() < 8*1024 {
-				startup.WriteString(line + "\n")
+			if !launched.Load() {
+				startupMu.Lock()
+				startup += line + "\n"
+				if len(startup) > 8*1024 {
+					startup = startup[len(startup)-8*1024:]
+				}
+				startupMu.Unlock()
 			}
-			startupMu.Unlock()
 			// e.g. "2026/10/14 10:00:00 [Warning] core: Xray 26.3.27 started"
 			if strings.Contains(line, "core: Xray") && strings.HasSuffix(line, " started") {
 				once.Do(func() { close(ready) })
@@ -103,6 +115,7 @@ func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(
 	var waitErr error
 	go func() {
 		waitErr = cmd.Wait()
+		<-logged
 		close(done)
 		c.mu.Lock()
 		unexpected := c.cmd == cmd && !c.stopped
@@ -110,7 +123,7 @@ func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(
 			c.cmd = nil
 		}
 		c.mu.Unlock()
-		// An exit during startup is reported by Start, not OnExit.
+		// An exit during startup is reported by Start, not onExit.
 		if unexpected && launched.Load() && onExit != nil {
 			onExit(exitError(waitErr))
 		}
@@ -118,7 +131,7 @@ func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(
 
 	failed := func() error {
 		startupMu.Lock()
-		out := strings.TrimSpace(startup.String())
+		out := strings.TrimSpace(startup)
 		startupMu.Unlock()
 		if out == "" {
 			out = exitError(waitErr).Error()
@@ -126,13 +139,22 @@ func (c *Core) StartWithExit(exe, configPath string, config []byte, onExit func(
 		return fmt.Errorf("核心启动失败：%s", startupError(out))
 	}
 	select {
+	case <-ctx.Done():
+		c.stop()
+		return ctx.Err()
 	case <-ready:
 	case <-done:
 		return failed()
-	case <-time.After(readyTimeout):
+	case <-time.After(timeout):
+		c.stop()
+		return errors.New("等待核心就绪超时，已停止未就绪的核心")
 	}
 	// Mark first, then check done: paired with the waiter closing done before reading the mark, an exit
-	// is reported either here or through OnExit.
+	// is reported either here or through onExit.
+	if err := ctx.Err(); err != nil {
+		c.stop()
+		return err
+	}
 	launched.Store(true)
 	select {
 	case <-done:

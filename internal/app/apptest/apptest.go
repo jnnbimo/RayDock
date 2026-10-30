@@ -108,10 +108,12 @@ func (f *Proxy) Apply(s sysproxy.Settings) error {
 type Autostart struct {
 	Mode system.StartMode
 	Err  error
+	Risk error // AdminRisk
 	Sets []system.StartMode
 }
 
 func (f *Autostart) Get() system.StartMode { return f.Mode }
+func (f *Autostart) AdminRisk() error      { return f.Risk }
 func (f *Autostart) Set(m system.StartMode) error {
 	f.Sets = append(f.Sets, m)
 	if f.Err == nil {

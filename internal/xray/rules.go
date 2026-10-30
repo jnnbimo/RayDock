@@ -15,8 +15,6 @@ type RuleSet struct {
 	Processes []string
 }
 
-func (r RuleSet) Empty() bool { return len(r.Domains)+len(r.IPs)+len(r.Processes) == 0 }
-
 // LineError reports a problem on a line, counted from 1.
 type LineError struct {
 	Line int

@@ -36,7 +36,6 @@ import (
 	"raydock/internal/localnet"
 	"raydock/internal/node"
 	"raydock/internal/probe"
-	"raydock/internal/system"
 )
 
 func coreForTest(t *testing.T) string {
@@ -46,22 +45,37 @@ func coreForTest(t *testing.T) string {
 		dir = filepath.Join(os.TempDir(), "raydock-core")
 	}
 	exe := filepath.Join(dir, ExeName())
-	if len(Missing(dir)) == 0 {
+	if len(Missing(dir)) == 0 && ReadGeoTag(dir) != "" {
 		return exe
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	client := &http.Client{}
-	rel, err := LatestRelease(ctx, client)
+	if len(Missing(dir)) > 0 {
+		rel, err := LatestRelease(ctx, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("downloading Xray %s", rel.Tag)
+		if err := Install(ctx, client, rel, dir, nil); err != nil {
+			t.Fatal(err)
+		}
+		if m := Missing(dir); len(m) > 0 {
+			t.Fatalf("still missing after install: %v", m)
+		}
+	}
+	// The package's own rule data has a few categories (no geoip:jp): RayDock runs the core with
+	// Loyalsoldier's, as its installer brings (cmd/fetchcore), and so do the tests.
+	tag, err := LatestGeo(ctx, client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("downloading Xray %s", rel.Tag)
-	if err := Install(ctx, client, rel, dir, nil); err != nil {
+	t.Logf("downloading rule data %s", tag)
+	if err := InstallGeo(ctx, client, tag, dir, nil); err != nil {
 		t.Fatal(err)
 	}
-	if m := Missing(dir); len(m) > 0 {
-		t.Fatalf("still missing after install: %v", m)
+	if err := os.WriteFile(filepath.Join(dir, GeoTagFile), []byte(tag+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	return exe
 }
@@ -113,7 +127,7 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 			"streamSettings":{"network":"masque","security":"tls","tlsSettings":{"serverName":"m.example.com"},"masqueSettings":{"user":"u","pass":"p"}}}`},
 	}
 	for _, n := range nodes {
-		cfg, err := BuildBackend(DefaultOptions(), Backend{Chain: []*node.Node{&n}, Mixed: 23457})
+		cfg, err := Build(DefaultOptions(), Run{Chain: []*node.Node{&n}})
 		if err != nil {
 			t.Fatalf("%s: %v", n.Transport(), err)
 		}
@@ -124,7 +138,7 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 	for _, mode := range []string{ModeRule, ModeGlobal, ModeDirect} {
 		o := DefaultOptions()
 		o.Mode = mode
-		cfg, err := BuildBackend(o, Backend{Chain: []*node.Node{&nodes[3]}, Mixed: 23457})
+		cfg, err := Build(o, Run{Chain: []*node.Node{&nodes[3]}})
 		if err != nil {
 			t.Fatalf("%s: %v", mode, err)
 		}
@@ -138,7 +152,7 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 		{&nodes[0], &nodes[15]},
 		{&nodes[6], &nodes[3], &nodes[14]},
 	} {
-		cfg, err := BuildBackend(DefaultOptions(), Backend{Chain: chain, Mixed: 23457})
+		cfg, err := Build(DefaultOptions(), Run{Chain: chain})
 		if err != nil {
 			t.Fatalf("chain %d: %v", i, err)
 		}
@@ -148,19 +162,15 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 	}
 	// The dedicated ports alone, each through its chain.
 	{
-		b := Backend{Mixed: 23457, Ports: []PortRoute{{20001, []*node.Node{&nodes[3]}}, {20002, []*node.Node{&nodes[12], &nodes[5]}}}}
-		cfg, err := BuildBackend(DefaultOptions(), b)
+		o := DefaultOptions()
+		o.APIPort, o.APIToken = 23459, "integration-token"
+		o.AllowLAN = true
+		cfg, err := Build(o, Run{Ports: []PortRoute{{20001, []*node.Node{&nodes[3]}}, {20002, []*node.Node{&nodes[12], &nodes[5]}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := checkConfig(exe, cfg); err != nil {
-			t.Errorf("dedicated ports: core rejected backend config: %v", err)
-		}
-		if cfg, err = BuildFront(DefaultOptions(), Front{Backend: b, PortsLAN: true, Gen: 1, APIPort: 23459}); err != nil {
-			t.Fatal(err)
-		}
-		if err := checkConfig(exe, cfg); err != nil {
-			t.Errorf("dedicated ports: core rejected front config: %v", err)
+			t.Errorf("dedicated ports: core rejected config: %v", err)
 		}
 	}
 	// TUN, FakeDNS, DoH and custom rules. -test only validates, so no adapter or admin rights are needed.
@@ -181,23 +191,22 @@ func TestIntegrationVersionAndTest(t *testing.T) {
 	for name, set := range variants {
 		o := DefaultOptions()
 		set(&o)
-		// Under TUN: the node and a dedicated port's chain bound to the physical interface, their addresses
-		// resolved by its DNS servers.
-		b := Backend{Chain: []*node.Node{&nodes[12], &nodes[0]}, Mixed: 23457, TUN: 23458, Local: &Local{Interface: "WLAN", DNS: []string{"192.168.1.1"}},
-			Ports: []PortRoute{{20001, []*node.Node{&nodes[5]}}}}
-		cfg, err := BuildBackend(o, b)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+		// Under TUN: the connection's chain and a dedicated port's bound to the physical interface, their
+		// addresses resolved by its DNS servers; on either adapter.
+		o.APIPort, o.APIToken = 23459, "integration-token"
+		r := Run{Chain: []*node.Node{&nodes[12], &nodes[0]}, Ports: []PortRoute{{20001, []*node.Node{&nodes[5]}}}}
+		if o.TUN.Enabled {
+			r.Local = &Local{Interface: "WLAN", DNS: []string{"192.168.1.1"}}
 		}
-		if err := checkConfig(exe, cfg); err != nil {
-			t.Errorf("%s: core rejected backend config: %v", name, err)
-		}
-		cfg, err = BuildFront(o, Front{Backend: b, Gen: 1, APIPort: 23459})
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if err := checkConfig(exe, cfg); err != nil {
-			t.Errorf("%s: core rejected front config: %v", name, err)
+		for adapter := range TUNNames {
+			r.Adapter = adapter
+			cfg, err := Build(o, r)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if err := checkConfig(exe, cfg); err != nil {
+				t.Errorf("%s on adapter %d: core rejected config: %v", name, adapter, err)
+			}
 		}
 	}
 }
@@ -274,9 +283,9 @@ func TestIntegrationEndToEnd(t *testing.T) {
 	serverCfg, _ := json.Marshal(server)
 	dir := t.TempDir()
 	var srv Core
-	var srvLog strings.Builder
-	srv.OnLog = func(line string) { srvLog.WriteString(line + "\n") }
-	if err := srv.Start(exe, filepath.Join(dir, "server.json"), serverCfg); err != nil {
+	var srvLog syncLog
+	srv.OnLog = srvLog.add
+	if err := srv.Start(context.Background(), exe, filepath.Join(dir, "server.json"), serverCfg, nil); err != nil {
 		t.Fatalf("server failed to start: %v", err)
 	}
 	defer srv.Stop()
@@ -313,16 +322,16 @@ func TestIntegrationEndToEnd(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			port := freePort(t)
-			// The node's outbounds as a backend core has them, behind an inbound the test can use.
+			// The node's outbounds as the core has them, behind an inbound the test can use.
 			cfg, err := BuildProbe([]PortRoute{{Port: port, Chain: []*node.Node{&tc.n}}}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			var cli Core
-			var cliLog strings.Builder
-			cli.OnLog = func(line string) { cliLog.WriteString(line + "\n") }
-			if err := cli.Start(exe, filepath.Join(dir, tc.name+".json"), cfg); err != nil {
+			var cliLog syncLog
+			cli.OnLog = cliLog.add
+			if err := cli.Start(context.Background(), exe, filepath.Join(dir, tc.name+".json"), cfg, nil); err != nil {
 				t.Fatalf("client failed to start: %v", err)
 			}
 			defer cli.Stop()
@@ -358,7 +367,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		var cli Core
-		if err := cli.Start(exe, filepath.Join(dir, "chain.json"), cfg); err != nil {
+		if err := cli.Start(context.Background(), exe, filepath.Join(dir, "chain.json"), cfg, nil); err != nil {
 			t.Fatal(err)
 		}
 		defer cli.Stop()
@@ -372,15 +381,20 @@ func TestIntegrationEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Dedicated ports alone: the front core takes each and hands it to the backend core, which reaches the
-	// target through the port's node, the second one through a chain. There is no local port.
+	// Dedicated ports alone: the core reaches the target through each port's node, the second one through
+	// a chain. There is no local port.
 	t.Run("ports", func(t *testing.T) {
 		p1, p2 := freePort(t), freePort(t)
 		o := proxiedLocally(t)
-		startConnection(t, exe, dir, "ports", o, Backend{Ports: []PortRoute{
+		o.APIPort, o.APIToken = freePort(t), "integration-token"
+		cfg, err := Build(o, Run{Ports: []PortRoute{
 			{p1, []*node.Node{byName["vmess"]}},
 			{p2, []*node.Node{byName["socks"], byName["trojan"]}},
-		}}, nil)
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		startCore(t, exe, dir, "ports", cfg, nil)
 		for _, p := range []int{p1, p2} {
 			if _, err := probe.ViaProxy(context.Background(), p, "http://"+l.Addr().String()+"/generate_204", 10*time.Second); err != nil {
 				t.Fatalf("port %d: %v", p, err)
@@ -394,11 +408,10 @@ func TestIntegrationEndToEnd(t *testing.T) {
 		}
 	})
 
-	// A connection: the front core hands everything to the backend core, which reaches the node, TCP and
-	// UDP alike.
-	t.Run("front and backend cores", func(t *testing.T) {
+	// A connection: the local port reaches the node, TCP and UDP alike.
+	t.Run("connection", func(t *testing.T) {
 		o := proxiedLocally(t)
-		startConnection(t, exe, dir, "conn", o, Backend{Chain: []*node.Node{byName["vless"]}}, nil)
+		startConnection(t, exe, dir, "conn", o, Run{Chain: []*node.Node{byName["vless"]}}, nil)
 		// Requests the server forwarded to the target.
 		targetHits := func() int { return strings.Count(srvLog.String(), "accepted tcp:"+l.Addr().String()) }
 		targetBefore := targetHits()
@@ -408,7 +421,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 		if err := socksGet(o.Port, l.Addr().String()); err != nil {
 			t.Fatalf("local port over SOCKS5: %v", err)
 		}
-		// UDP too (remote DNS queries, QUIC): front core → backend core → vless → server.
+		// UDP too (remote DNS queries, QUIC): core → vless → server.
 		echo, err := net.ListenPacket("udp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -428,9 +441,57 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			t.Fatalf("UDP through the local port: %v\nserver log:\n%s", err, srvLog.String())
 		}
 		time.Sleep(200 * time.Millisecond)
-		// Both requests reached the server: the cores have no other way out than the node.
+		// Both requests reached the server: the core has no other way out than the node.
 		if n := targetHits() - targetBefore; n != 2 {
 			t.Errorf("the server should have forwarded 2 requests, got %d\n%s", n, srvLog.String())
+		}
+	})
+	// A restart: the new core starts without public listeners, then activates them exclusively once the
+	// old core stops. TCP and UDP remain supported without letting an unrelated socket join.
+	t.Run("overlap", func(t *testing.T) {
+		if !Overlap {
+			t.Skip("the old core stops first")
+		}
+		o := proxiedLocally(t)
+		port := freePort(t)
+		r := Run{Chain: []*node.Node{byName["vless"]}, Ports: []PortRoute{{port, []*node.Node{byName["vmess"]}}}}
+		o.APIPort, o.APIToken = freePort(t), "integration-old-token"
+		old := startCore(t, exe, dir, "old", mustBuild(t, o, r), nil)
+		o.APIPort, o.APIToken = freePort(t), "integration-new-token"
+		r.Deferred = true
+		next := startCore(t, exe, dir, "new", mustBuild(t, o, r), nil)
+		if !old.Running() || !next.Running() {
+			t.Fatal("both cores should run")
+		}
+		old.Stop()
+		r.Deferred = false
+		client := StatsClient(o.APIToken)
+		defer client.CloseIdleConnections()
+		if err := ActivateListeners(context.Background(), client, o.APIPort, mustBuild(t, o, r)); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []int{o.Port, port} {
+			if _, err := probe.ViaProxy(context.Background(), p, "http://"+l.Addr().String()+"/generate_204", 10*time.Second); err != nil {
+				t.Fatalf("port %d after the old core stopped: %v", p, err)
+			}
+		}
+		echo, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer echo.Close()
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, from, err := echo.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				echo.WriteTo(buf[:n], from)
+			}
+		}()
+		if err := socksUDPEcho(o.Port, echo.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatalf("UDP through the new core: %v", err)
 		}
 	})
 	// Speed test: a probe core with its own port, download and upload through a node.
@@ -454,7 +515,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		var cli Core
-		if err := cli.Start(exe, filepath.Join(dir, "speed.json"), cfg); err != nil {
+		if err := cli.Start(context.Background(), exe, filepath.Join(dir, "speed.json"), cfg, nil); err != nil {
 			t.Fatal(err)
 		}
 		defer cli.Stop()
@@ -471,173 +532,24 @@ func TestIntegrationEndToEnd(t *testing.T) {
 		t.Logf("through VLESS: down %.1f MB/s, up %.1f MB/s", down/(1<<20), up/(1<<20))
 	})
 
-	// Nothing programs use goes away while RayDock applies a change: a new backend core starts beside the
-	// old one, the front core is switched over through its API, and the old one carries its transfers to
-	// their end; only then does it stop. Routing rules alone are switched into the running backend core.
-	t.Run("seamless", func(t *testing.T) {
-		// A transfer stays open after its first KB until the test reads the rest (finishes): it outlasts
-		// a change however long the change takes.
-		resume := make(chan struct{}, 1)
-		stream := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write(make([]byte, 1024))
-			w.(http.Flusher).Flush()
-			select {
-			case <-resume:
-			case <-r.Context().Done():
-				return
-			}
-			for range 9 {
-				w.Write(make([]byte, 1024))
-				w.(http.Flusher).Flush()
-				time.Sleep(20 * time.Millisecond)
-			}
-		})}
-		sl, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		go stream.Serve(sl)
-		defer stream.Close()
-		// The server logs the connection its inbound of a node takes, the next hop of a chain too.
-		hits := func(name string) int {
-			return strings.Count(srvLog.String(), fmt.Sprintf("accepted tcp:127.0.0.1:%d", ports[name]))
-		}
-		started := func(port int) *http.Response {
-			t.Helper()
-			resp, err := probe.ProxyClient(port).Get("http://" + sl.Addr().String() + "/stream")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := io.ReadFull(resp.Body, make([]byte, 1024)); err != nil {
-				t.Fatal(err)
-			}
-			return resp
-		}
-		finishes := func(what string, resp *http.Response) {
-			t.Helper()
-			defer resp.Body.Close()
-			resume <- struct{}{}
-			if n, err := io.Copy(io.Discard, resp.Body); err != nil || n != 9*1024 {
-				t.Fatalf("%s: the transfer ended after %d bytes: %v", what, n, err)
-			}
-		}
+	// Rules of the connection, process rules among them: the core sees the program of each connection.
+	t.Run("rules", func(t *testing.T) {
 		get := func(port int) error {
 			_, err := probe.ViaProxy(context.Background(), port, "http://"+l.Addr().String()+"/generate_204", 10*time.Second)
 			return err
 		}
-		// replaced lets backend core c finish its transfer resp, which it alone carries, then stops it.
-		replaced := func(what string, c *Core, mixed int, resp *http.Response) {
-			t.Helper()
-			if n := system.Connections(mixed); n != 1 {
-				t.Errorf("%s: the old backend core carries %d connections, want the transfer's", what, n)
+		for _, c := range []struct {
+			rules string
+			ok    bool
+		}{{"127.0.0.1/32", false}, {"process:" + filepath.Base(os.Args[0]), false}, {"process:other.exe", true}} {
+			o := proxiedLocally(t)
+			o.BlockRules = c.rules
+			core := startConnection(t, exe, dir, "rules", o, Run{Chain: []*node.Node{byName["vless"]}}, nil)
+			if err := get(o.Port); (err == nil) != c.ok {
+				t.Errorf("block %q: %v", c.rules, err)
 			}
-			finishes(what, resp)
-			waitFor(t, func() bool { return system.Connections(mixed) == 0 })
-			c.Stop()
+			core.Stop()
 		}
-
-		o := proxiedLocally(t)
-		c := startConnection(t, exe, dir, "seamless", o, Backend{Chain: []*node.Node{byName["vmess"]}}, nil)
-
-		// Another node: a new backend core; new connections take the new node.
-		resp := started(o.Port)
-		old, oldMixed := c.backend, c.b.Mixed
-		next := c.b
-		next.Chain = []*node.Node{byName["socks"], byName["trojan"]}
-		c.replaceBackend(t, o, next, nil)
-		before := hits("trojan")
-		if err := get(o.Port); err != nil || hits("trojan") == before {
-			t.Fatalf("new connections take the new node: %v", err)
-		}
-		replaced("another node", old, oldMixed, resp)
-
-		// Other routing rules: switched into the running backend core, which then blocks the target.
-		block := c.o
-		block.BlockRules = "127.0.0.1/32"
-		cfg, err := BuildBackend(block, c.b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !CanSwitch(c.backendCfg, cfg) {
-			t.Fatal("other rules switch through the API")
-		}
-		routing, _ := SwitchParts(cfg)
-		if err := c.backendAPI.Switch(routing); err != nil {
-			t.Fatal(err)
-		}
-		before = hits("socks")
-		if err := get(o.Port); err == nil || hits("socks") != before {
-			t.Fatalf("the block rule switched in should block: %v", err)
-		}
-		routing, _ = SwitchParts(c.backendCfg)
-		if err := c.backendAPI.Switch(routing); err != nil {
-			t.Fatal(err)
-		}
-		if err := get(o.Port); err != nil {
-			t.Fatalf("the rules switched back: %v", err)
-		}
-
-		// New settings for the backend core: a new one; the local port never closes.
-		resp = started(o.Port)
-		old, oldMixed = c.backend, c.b.Mixed
-		var newLog syncLog
-		o.LogLevel = "info" // logs each connection it takes
-		c.restartBackend(t, o, &newLog)
-		if err := get(o.Port); err != nil || !strings.Contains(newLog.String(), "accepted tcp:"+l.Addr().String()) {
-			t.Fatalf("new connections take the new backend core: %v\n%s", err, newLog.String())
-		}
-		replaced("new settings", old, oldMixed, resp)
-
-		// A process rule: only the front core sees the program; it hands its connections over as the
-		// block user, which the backend core blocks.
-		blocked := o
-		blocked.BlockRules = "process:" + filepath.Base(os.Args[0])
-		c.restartBackend(t, blocked, nil)
-		if err := get(o.Port); err == nil {
-			t.Fatal("the process rule did not block this program")
-		}
-		c.restartBackend(t, o, nil)
-
-		// Another local port: the front core opens it beside the old one, which then closes.
-		resp = started(o.Port)
-		moved := o
-		moved.Port = freePort(t)
-		c.switchFront(t, moved, c.b)
-		if err := get(moved.Port); err != nil {
-			t.Fatalf("new port: %v", err)
-		}
-		if err := get(o.Port); err == nil {
-			t.Error("the old port still takes connections")
-		}
-		finishes("old port", resp)
-
-		// A dedicated port joins the connection: the front core opens it, a new backend core relays it
-		// through its own node; the transfer on the local port goes on.
-		resp = started(moved.Port)
-		old, oldMixed = c.backend, c.b.Mixed
-		p := freePort(t)
-		withPort := c.b
-		withPort.Ports = []PortRoute{{p, []*node.Node{byName["socks"], byName["vless"]}}} // hits counts the second hop
-		c.replaceBackend(t, moved, withPort, nil)
-		before = hits("vless")
-		if err := get(p); err != nil || hits("vless") == before {
-			t.Fatalf("the dedicated port goes through its node: %v", err)
-		}
-		replaced("a dedicated port", old, oldMixed, resp)
-
-		// Disconnected: the dedicated port goes on, the local port closes.
-		resp = started(p)
-		old, oldMixed = c.backend, c.b.Mixed
-		alone := c.b
-		alone.Chain = nil
-		c.replaceBackend(t, moved, alone, nil)
-		if err := get(p); err != nil {
-			t.Fatalf("the dedicated port after disconnecting: %v", err)
-		}
-		if err := get(moved.Port); err == nil {
-			t.Error("the local port still takes connections")
-		}
-		replaced("disconnected", old, oldMixed, resp)
 	})
 
 	// Latency of nodes reached over UDP: one probe core serves each on its own port, and a request is timed
@@ -660,7 +572,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		var cli Core
-		if err := cli.Start(exe, filepath.Join(dir, "pin.json"), cfg); err != nil {
+		if err := cli.Start(context.Background(), exe, filepath.Join(dir, "pin.json"), cfg, nil); err != nil {
 			t.Fatal(err)
 		}
 		defer cli.Stop()
@@ -675,7 +587,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		var named Core
-		if err := named.Start(exe, filepath.Join(dir, "pin-name.json"), cfg); err != nil {
+		if err := named.Start(context.Background(), exe, filepath.Join(dir, "pin-name.json"), cfg, nil); err != nil {
 			t.Fatal(err)
 		}
 		defer named.Stop()
@@ -698,7 +610,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		var cli Core
-		if err := cli.Start(exe, filepath.Join(dir, "latency.json"), cfg); err != nil {
+		if err := cli.Start(context.Background(), exe, filepath.Join(dir, "latency.json"), cfg, nil); err != nil {
 			t.Fatal(err)
 		}
 		defer cli.Stop()
@@ -857,7 +769,7 @@ func TestIntegrationLocalNetwork(t *testing.T) {
 	var core Core
 	var coreLog strings.Builder
 	core.OnLog = func(line string) { coreLog.WriteString(line + "\n") }
-	if err := core.Start(exe, filepath.Join(t.TempDir(), "resolver.json"), cfg); err != nil {
+	if err := core.Start(context.Background(), exe, filepath.Join(t.TempDir(), "resolver.json"), cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	defer core.Stop()
@@ -894,7 +806,9 @@ func TestIntegrationStopDuringStart(t *testing.T) {
 	for i := range 5 {
 		var c Core
 		started := make(chan error, 1)
-		go func() { started <- c.Start(exe, filepath.Join(dir, fmt.Sprint(i, ".json")), cfg) }()
+		go func() {
+			started <- c.Start(context.Background(), exe, filepath.Join(dir, fmt.Sprint(i, ".json")), cfg, nil)
+		}()
 		time.Sleep(time.Duration(5+i*20) * time.Millisecond) // Stop comes after Start began
 		c.Stop()
 		<-started
@@ -928,7 +842,7 @@ func startCore(t *testing.T, exe, dir, name string, cfg []byte, log *syncLog) *C
 	if log != nil {
 		c.OnLog = log.add
 	}
-	if err := c.Start(exe, filepath.Join(dir, name+".json"), cfg); err != nil {
+	if err := c.Start(context.Background(), exe, filepath.Join(dir, name+".json"), cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.Stop)
@@ -943,82 +857,15 @@ func proxiedLocally(t *testing.T) Options {
 	return o
 }
 
-// testConn is a connection's front and backend cores.
-type testConn struct {
-	exe, dir   string
-	o          Options // the backend's, its API port included
-	b          Backend
-	backend    *Core
-	backendCfg []byte
-	backendAPI API
-	front      Front
-	frontCfg   []byte
-	frontAPI   API
-	n          int
-}
-
-// startConnection starts a backend core built with b, on relay and API ports of its own, and a front core
-// handing over to it, on o.Port when b connects.
-func startConnection(t *testing.T, exe, dir, name string, o Options, b Backend, log *syncLog) *testConn {
+// startConnection starts a connection's core built with o and c, its API on a port of its own.
+func startConnection(t *testing.T, exe, dir, name string, o Options, r Run, log *syncLog) *Core {
 	t.Helper()
-	c := &testConn{exe: exe, dir: dir}
-	c.startBackend(t, o, b, log)
-	c.front = Front{Backend: c.b, Gen: 1, APIPort: freePort(t)}
-	cfg, err := BuildFront(o, c.front)
+	o.APIPort, o.APIToken = freePort(t), "integration-token"
+	cfg, err := Build(o, r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	startCore(t, exe, dir, name+"-front", cfg, nil)
-	c.frontCfg, c.frontAPI = cfg, API{Exe: exe, Addr: fmt.Sprintf("127.0.0.1:%d", c.front.APIPort)}
-	return c
-}
-
-func (c *testConn) startBackend(t *testing.T, o Options, b Backend, log *syncLog) {
-	t.Helper()
-	c.n++
-	b.Mixed, o.APIPort = freePort(t), freePort(t)
-	cfg, err := BuildBackend(o, b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.backend = startCore(t, c.exe, c.dir, fmt.Sprintf("backend-%d", c.n), cfg, log)
-	c.o, c.b, c.backendCfg = o, b, cfg
-	c.backendAPI = API{Exe: c.exe, Addr: fmt.Sprintf("127.0.0.1:%d", o.APIPort)}
-}
-
-// replaceBackend starts a new backend core built with o and b, beside the running one, and switches the
-// front core to it.
-func (c *testConn) replaceBackend(t *testing.T, o Options, b Backend, log *syncLog) {
-	t.Helper()
-	c.startBackend(t, o, b, log)
-	c.switchFront(t, o, c.b)
-}
-
-// restartBackend starts a new backend core with o, beside the running one, and switches the front core to it.
-func (c *testConn) restartBackend(t *testing.T, o Options, log *syncLog) {
-	t.Helper()
-	c.replaceBackend(t, o, c.b, log)
-}
-
-func (c *testConn) switchFront(t *testing.T, o Options, b Backend) {
-	t.Helper()
-	f := c.front
-	f.Backend, f.Gen = b, f.Gen+1
-	next, err := BuildFront(o, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !CanSwitchFront(c.frontCfg, next) {
-		t.Fatal("the front core cannot switch")
-	}
-	s, err := FrontParts(c.frontCfg, next)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.frontAPI.SwitchFront(s); err != nil {
-		t.Fatal(err)
-	}
-	c.front, c.frontCfg = f, next
+	return startCore(t, exe, dir, name, cfg, log)
 }
 
 func waitFor(t *testing.T, cond func() bool) {
