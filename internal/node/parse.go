@@ -1,6 +1,7 @@
 package node
 
 import (
+	"cmp"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -261,10 +262,10 @@ func parseHysteria2(link string) (Node, error) {
 		Password:  unescape(userinfo),
 		Name:      name,
 		Security:  "tls",
-		SNI:       first(q.Get("sni"), q.Get("peer")),
+		SNI:       cmp.Or(q.Get("sni"), q.Get("peer")),
 		ALPN:      q.Get("alpn"),
 		Insecure:  truthy(q.Get("insecure")) || truthy(q.Get("allowInsecure")),
-		PinSHA256: first(q.Get("pinSHA256"), q.Get("pcs"), q.Get("pinnedPeerCertSha256")),
+		PinSHA256: cmp.Or(q.Get("pinSHA256"), q.Get("pcs"), q.Get("pinnedPeerCertSha256")),
 		FinalMask: q.Get("fm"),
 	}
 	host, ports, err := splitHostPorts(hostport)
@@ -284,7 +285,7 @@ func parseHysteria2(link string) (Node, error) {
 		}
 		n.HopPorts = mport
 	}
-	if iv := first(q.Get("hop_interval"), q.Get("hopInterval")); iv != "" {
+	if iv := cmp.Or(q.Get("hop_interval"), q.Get("hopInterval")); iv != "" {
 		sec, err := strconv.Atoi(strings.TrimSuffix(iv, "s"))
 		if err != nil || sec <= 0 {
 			return Node{}, fmt.Errorf("跳跃间隔 %q 无效", iv)
@@ -292,7 +293,7 @@ func parseHysteria2(link string) (Node, error) {
 		n.HopInterval = sec
 	}
 	n.Obfs = strings.ToLower(q.Get("obfs"))
-	n.ObfsPassword = first(q.Get("obfs-password"), q.Get("obfs_password"), q.Get("obfsPassword"))
+	n.ObfsPassword = cmp.Or(q.Get("obfs-password"), q.Get("obfs_password"), q.Get("obfsPassword"))
 	if n.Port == 0 {
 		n.Port = 443
 	}
@@ -344,7 +345,7 @@ func parseHTTP(link string, tls bool) (Node, error) {
 		n.Security = "tls"
 		n.SNI = q.Get("sni")
 		n.Insecure = truthy(q.Get("insecure")) || truthy(q.Get("allowInsecure"))
-		n.PinSHA256 = first(q.Get("pcs"), q.Get("pinSHA256"))
+		n.PinSHA256 = cmp.Or(q.Get("pcs"), q.Get("pinSHA256"))
 	}
 	if userinfo != "" {
 		n.Username, n.Password = credentials(userinfo)
@@ -361,13 +362,13 @@ func parseWireGuard(link string) (Node, error) {
 		Protocol:     WireGuard,
 		Name:         name,
 		SecretKey:    unescape(userinfo),
-		PublicKey:    first(q.Get("publickey"), q.Get("publicKey"), q.Get("peer_public_key"), q.Get("public_key")),
-		PreSharedKey: first(q.Get("presharedkey"), q.Get("preSharedKey"), q.Get("pre_shared_key"), q.Get("psk")),
-		LocalAddress: strings.ReplaceAll(first(q.Get("address"), q.Get("ip")), " ", ""),
+		PublicKey:    cmp.Or(q.Get("publickey"), q.Get("publicKey"), q.Get("peer_public_key"), q.Get("public_key")),
+		PreSharedKey: cmp.Or(q.Get("presharedkey"), q.Get("preSharedKey"), q.Get("pre_shared_key"), q.Get("psk")),
+		LocalAddress: strings.ReplaceAll(cmp.Or(q.Get("address"), q.Get("ip")), " ", ""),
 		Reserved:     strings.ReplaceAll(q.Get("reserved"), " ", ""),
 	}
 	if n.SecretKey == "" {
-		n.SecretKey = first(q.Get("privatekey"), q.Get("private_key"), q.Get("secretKey"))
+		n.SecretKey = cmp.Or(q.Get("privatekey"), q.Get("private_key"), q.Get("secretKey"))
 	}
 	if mtu := q.Get("mtu"); mtu != "" {
 		v, err := strconv.Atoi(mtu)
@@ -384,23 +385,23 @@ func parseWireGuard(link string) (Node, error) {
 // applyStream reads transport and security parameters (XTLS/Xray-core#716).
 func applyStream(n *Node, q url.Values, defaultSecurity string) error {
 	var err error
-	if n.Network, err = network(first(q.Get("type"), q.Get("network"))); err != nil {
+	if n.Network, err = network(cmp.Or(q.Get("type"), q.Get("network"))); err != nil {
 		return err
 	}
-	n.Security = strings.ToLower(first(q.Get("security"), defaultSecurity))
-	n.SNI = first(q.Get("sni"), q.Get("servername"), q.Get("peer"))
+	n.Security = strings.ToLower(cmp.Or(q.Get("security"), defaultSecurity))
+	n.SNI = cmp.Or(q.Get("sni"), q.Get("servername"), q.Get("peer"))
 	n.Fingerprint = q.Get("fp")
 	n.ALPN = q.Get("alpn")
 	n.Insecure = truthy(q.Get("allowInsecure")) || truthy(q.Get("insecure"))
 	n.PublicKey, n.ShortID, n.SpiderX, n.MLDSA65 = q.Get("pbk"), q.Get("sid"), q.Get("spx"), q.Get("pqv")
-	n.PinSHA256 = first(q.Get("pcs"), q.Get("pinSHA256"))
+	n.PinSHA256 = cmp.Or(q.Get("pcs"), q.Get("pinSHA256"))
 	n.VerifyName, n.ECHConfig = q.Get("vcn"), q.Get("ech")
 	n.HostHeader = q.Get("host")
 	n.HeaderType = q.Get("headerType")
 	n.FinalMask = q.Get("fm")
 	switch n.Network {
 	case "grpc":
-		n.Path = first(q.Get("serviceName"), q.Get("path"))
+		n.Path = cmp.Or(q.Get("serviceName"), q.Get("path"))
 		n.Mode = q.Get("mode")
 		n.Authority = q.Get("authority")
 	case "xhttp":
@@ -576,13 +577,4 @@ func truthy(s string) bool {
 		return true
 	}
 	return false
-}
-
-func first(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

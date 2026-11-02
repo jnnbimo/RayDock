@@ -21,7 +21,7 @@ type colWidths struct{ protocol, port, latency, ip, speed float32 }
 var (
 	widestLatency = []string{"9999 ms"}
 	widestIP      = []string{"255.255.255.255"}
-	widestRate    = []string{"↓ 999.9 MB/s", "↓ 1023 KB/s"}
+	widestRate    = []string{"↓ 999.9 MB/s", "↓ 1023.9 KB/s"}
 	widestPort    = []string{"65535"}
 )
 
@@ -353,27 +353,16 @@ func (a *View) speedCell(c *ui.Context, id, via string, width float32, sub ui.Co
 				ui.Text(c, s.Phase).TextColor(sub)
 			})
 		case s.Down == 0:
-			ui.Text(c, "失败").FontSize(12).TextColor(p.danger).Tooltip(joinLines(s.Err, via))
+			ui.Text(c, "失败").FontSize(12).TextColor(p.danger).Tooltip(joinNonEmpty("\n", s.Err, via))
 		default:
-			ui.Text(c, "↓ "+formatRate(s.Down)).TextColor(p.text).Tooltip(via)
+			ui.Text(c, "↓ "+formatSpeed(s.Down)).TextColor(p.text).Tooltip(via)
 			if s.Err != "" {
-				ui.Text(c, "↑ 失败").TextColor(p.danger).Tooltip(joinLines(s.Err, via))
+				ui.Text(c, "↑ 失败").TextColor(p.danger).Tooltip(joinNonEmpty("\n", s.Err, via))
 			} else {
-				ui.Text(c, "↑ "+formatRate(s.Up)).TextColor(sub).Tooltip(via)
+				ui.Text(c, "↑ "+formatSpeed(s.Up)).TextColor(sub).Tooltip(via)
 			}
 		}
 	})
-}
-
-func joinLines(lines ...string) string {
-	return strings.Join(slices.DeleteFunc(lines, func(s string) bool { return s == "" }), "\n")
-}
-
-func formatRate(bps float64) string {
-	if bps >= 1<<20 {
-		return fmt.Sprintf("%.1f MB/s", bps/(1<<20))
-	}
-	return fmt.Sprintf("%.0f KB/s", bps/(1<<10))
 }
 
 func (a *View) emptyNodes(c *ui.Context) {

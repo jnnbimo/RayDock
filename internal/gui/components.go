@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/egoist/mygo/plugins/glass"
@@ -172,12 +171,6 @@ func (a *View) fieldError(c *ui.Context, err error) {
 	}
 }
 
-func formatDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	h, m, s := int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60
-	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
-}
-
 func segmentTrack(t *ui.Theme, track ui.Element) ui.Element {
 	return lift(t.Dark, track.Height(controlHeight).AlignItems(ui.Stretch).Padding(t.Space(0.5)).Gap(t.Space(0.5)).Radius(t.Radius).
 		Material(glass.Glass{Tint: t.Surface}).Border(1, t.Border))
@@ -209,4 +202,25 @@ func navTabs(c *ui.Context, selected *int, n int, content func(i int), configure
 		}
 	})
 	return tabs.List
+}
+
+func (a *View) toasts(c *ui.Context) {
+	p, t := a.pal, a.theme
+	w, _ := c.Size()
+	ui.ToastViewportBase(c, func(viewport ui.Element, toasts []ui.Toast) {
+		viewport.Padding(0, 0, t.Space(6), 0).AlignItems(ui.Center).Gap(t.Space(2))
+		for _, ts := range toasts {
+			toast := ui.ToastBase(c, ts)
+			box := p.popup(toast.Root.Row().AlignItems(ui.Center).Padding(t.Space(2.5), t.Space(4)).Radius(t.Radius + 4).
+				MaxWidth(w - t.Space(12)))
+			const fade = 200 * time.Millisecond
+			if left := toast.Left(); left > 0 && left < fade {
+				box.Opacity(float32(left) / float32(fade))
+				c.AnimationFrame()
+			} else if left > 0 {
+				c.After(left - fade)
+			}
+			box.Children(func() { ui.Text(c, ts.Title).TextColor(p.text) })
+		}
+	})
 }

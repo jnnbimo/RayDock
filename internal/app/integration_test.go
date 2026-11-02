@@ -29,7 +29,7 @@ func TestIntegrationRestartOnChange(t *testing.T) {
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestIntegrationRestartOnChange(t *testing.T) {
 	}
 	start := time.Now()
 	a.Connect(first, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 	if a.Conn != StateOn || core().PID() == 0 || running() != 1 {
 		t.Fatalf("connect: %v %q, %d cores", a.Conn, a.ConnErr, running())
 	}
@@ -179,7 +179,7 @@ func TestIntegrationRestartOnChange(t *testing.T) {
 		resp, old := transfer(a.ProxyPort()), core()
 		start := time.Now()
 		change()
-		waitRegression(t, posts, func() bool { return a.ConnErr != "" || a.Conn == StateOn && core() != nil && core() != old })
+		waitFor(t, posts, func() bool { return a.ConnErr != "" || a.Conn == StateOn && core() != nil && core() != old })
 		if a.Conn != StateOn || a.ConnErr != "" || core() == old || old.Running() || running() != 1 {
 			t.Fatalf("%s: state %v err %q, new core %v", what, a.Conn, a.ConnErr, core() != old)
 		}
@@ -257,7 +257,7 @@ func TestIntegrationRestartOnChange(t *testing.T) {
 	}
 	// Connected again beside it, then without it.
 	a.Connect(first, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 	if a.Conn != StateOn || !listening(dedicated) || running() != 1 {
 		t.Fatalf("connected beside the dedicated port: %v %q", a.Conn, a.ConnErr)
 	}
@@ -274,14 +274,14 @@ func TestIntegrationRestartOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	proc.Kill()
-	waitRegression(t, posts, func() bool { return a.Conn == StateOff })
+	waitFor(t, posts, func() bool { return a.Conn == StateOff })
 	waitOperation(t, a.coreDo(func() {}))
-	drainRegression(posts)
+	drainPosts(posts)
 	if !strings.Contains(a.ConnErr, "核心") || coresRunning(a) {
 		t.Fatalf("after the core exited: err %q running %v", a.ConnErr, coresRunning(a))
 	}
 	a.Shutdown()
-	drainRegression(posts)
+	drainPosts(posts)
 }
 
 // eventually waits for cond, which no posted result need change, running those posted meanwhile.
@@ -314,7 +314,7 @@ func TestIntegrationConnectionOperationOrder(t *testing.T) {
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -330,19 +330,19 @@ func TestIntegrationConnectionOperationOrder(t *testing.T) {
 	for range 5 {
 		a.Connect(first, nil)
 		a.Connect(second, nil)
-		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+		waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 		if a.Conn != StateOn || a.ActiveID != second || !coresRunning(a) {
 			t.Fatalf("latest connection not committed: state=%v id=%s error=%q", a.Conn, a.ActiveID, a.ConnErr)
 		}
 		a.Disconnect()
 		a.Connect(first, nil)
-		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+		waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 		if a.Conn != StateOn || a.ActiveID != first || !coresRunning(a) {
 			t.Fatalf("older Stop killed latest Start: %q", a.ConnErr)
 		}
 		a.Disconnect()
 		waitOperation(t, a.coreDo(func() {}))
-		drainRegression(posts)
+		drainPosts(posts)
 		if coresRunning(a) {
 			t.Fatal("disconnected core still running")
 		}
@@ -355,7 +355,7 @@ func TestIntegrationConnectionOperationOrder(t *testing.T) {
 	// Shutdown must drain queued starts as well, without a late core after return.
 	a.Connect(first, nil)
 	a.Shutdown()
-	drainRegression(posts)
+	drainPosts(posts)
 	if coresRunning(a) {
 		t.Fatal("core started after shutdown")
 	}
@@ -372,7 +372,7 @@ func TestIntegrationFailedRestartEnds(t *testing.T) {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
 	for _, taken := range []bool{false, true} {
-		a, posts, _ := newRegressionApp(t)
+		a, posts, _ := newTestApp(t)
 		if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +383,7 @@ func TestIntegrationFailedRestartEnds(t *testing.T) {
 		a.ImportLinks(`{"protocol":"socks","settings":{"address":"127.0.0.1","port":10},"streamSettings":{"network":"no-such-transport"}}`, "")
 		broken := a.State.Nodes[1].ID
 		a.Connect(first, nil)
-		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+		waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 		if a.Conn != StateOn {
 			t.Fatal(a.ConnErr)
 		}
@@ -398,16 +398,16 @@ func TestIntegrationFailedRestartEnds(t *testing.T) {
 		} else {
 			a.Connect(broken, nil)
 		}
-		waitRegression(t, posts, func() bool { return a.Conn == StateOff })
+		waitFor(t, posts, func() bool { return a.Conn == StateOff })
 		waitOperation(t, a.coreDo(func() {}))
-		drainRegression(posts)
+		drainPosts(posts)
 		if a.ConnErr == "" || coresRunning(a) {
 			t.Fatalf("taken %v: err %q, running %v", taken, a.ConnErr, coresRunning(a))
 		}
 		// What failed is not left in the way of the next connection.
 		a.State.Settings.Port, _ = freePort()
 		a.Connect(first, nil)
-		waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+		waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 		if a.Conn != StateOn || a.ConnErr != "" {
 			t.Fatalf("taken %v: the next connection: state %v err %q", taken, a.Conn, a.ConnErr)
 		}

@@ -16,7 +16,7 @@ FunctionEnd
 Function un.onInit
   ; Confirm once before resource cleanup, not after changing the running application's state.
   IfSilent prepare
-  MessageBox MB_OKCANCEL|MB_ICONQUESTION "卸载将先退出 RayDock、恢复系统代理并移除开机自启。是否继续？" IDOK prepare
+  MessageBox MB_OKCANCEL|MB_ICONQUESTION "卸载将先退出 RayDock、恢复系统代理并移除开机自启，并删除程序目录及其中的 data 文件夹（节点、订阅与设置）。需要保留请先备份 data 文件夹。是否继续？" IDOK prepare
   SetErrorLevel 1
   Abort
   prepare:

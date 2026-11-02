@@ -16,7 +16,7 @@ func TestIntegrationBadPortLeavesHealthyConnection(t *testing.T) {
 	if root == "" {
 		t.Skip("RAYDOCK_CORE_DIR required")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestIntegrationBadPortLeavesHealthyConnection(t *testing.T) {
 	a.ImportLinks(`{"protocol":"socks","settings":{"address":"127.0.0.1","port":10},"streamSettings":{"network":"no-such-transport"}}`, "")
 	good, bad := a.State.Nodes[0].ID, a.State.Nodes[1].ID
 	a.Connect(good, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 	if a.Conn != StateOn {
 		t.Fatal(a.ConnErr)
 	}
@@ -35,7 +35,7 @@ func TestIntegrationBadPortLeavesHealthyConnection(t *testing.T) {
 	if err := a.SetNodePort(bad, port); err != nil {
 		t.Fatal(err)
 	}
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn && a.PortErrs[bad] != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn && a.PortErrs[bad] != "" })
 	if a.running.core() != old || !old.core.Running() || a.Since != since || a.ConnErr != "" {
 		t.Fatal("unrelated bad port touched the healthy connection")
 	}
@@ -58,7 +58,7 @@ func TestIntegrationBadPortLeavesHealthyConnection(t *testing.T) {
 	if err := a.EditNode(n); err != nil {
 		t.Fatal(err)
 	}
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn && a.PortErrs[bad] == "" && a.running.core() != old })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn && a.PortErrs[bad] == "" && a.running.core() != old })
 	if !a.ownPorts[port] || a.portTaken(port) {
 		t.Fatal("live owned listener not recognized")
 	}

@@ -21,7 +21,7 @@ func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	a.ImportLinks("socks://127.0.0.1:9#working", "")
 	a.ImportLinks(`{"protocol":"socks","settings":{"address":"127.0.0.1","port":10},"streamSettings":{"network":"no-such-transport"}}`, "")
 	a.Connect(a.State.Nodes[0].ID, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 	if a.Conn != StateOn {
 		t.Fatal(a.ConnErr)
 	}
@@ -58,9 +58,9 @@ func TestIntegrationExitDuringFailedSwitch(t *testing.T) {
 	}
 	release()
 	waitOperation(t, a.coreDo(func() {}))
-	waitRegression(t, posts, func() bool { return a.Conn == StateOff })
+	waitFor(t, posts, func() bool { return a.Conn == StateOff })
 	waitOperation(t, a.coreDo(func() {}))
-	drainRegression(posts)
+	drainPosts(posts)
 	if a.ConnErr == "" || coresRunning(a) {
 		t.Fatalf("dead core was restored or left running: state=%v error=%q", a.Conn, a.ConnErr)
 	}
@@ -71,7 +71,7 @@ func TestIntegrationGeoDownloadBesideQueuedStart(t *testing.T) {
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -123,11 +123,11 @@ func TestIntegrationGeoDownloadBesideQueuedStart(t *testing.T) {
 		t.Fatal("a staged download made the installed core unusable")
 	}
 	finishDownload()
-	waitRegression(t, posts, func() bool { return a.coreHold })
+	waitFor(t, posts, func() bool { return a.coreHold })
 	release()
-	waitRegression(t, posts, func() bool { return !a.GeoBusy && a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return !a.GeoBusy && a.Conn == StateOn || a.ConnErr != "" })
 	waitOperation(t, a.coreDo(func() {}))
-	drainRegression(posts)
+	drainPosts(posts)
 	if a.Conn != StateOn || a.ConnErr != "" || a.GeoErr != "" || a.coreHold || !a.running.core().core.Running() {
 		t.Fatalf("start/commit failed: state=%v connection=%q geo=%q hold=%v", a.Conn, a.ConnErr, a.GeoErr, a.coreHold)
 	}

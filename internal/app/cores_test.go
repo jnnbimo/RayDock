@@ -12,7 +12,7 @@ import (
 // A change of the connection made while the core files are replaced waits, the core running meanwhile,
 // and is then made as it was asked: the connection keeps its time, the settings not applied stay pending.
 func TestChangeWaitsForCoreFiles(t *testing.T) {
-	a, _, _ := newRegressionApp(t)
+	a, _, _ := newTestApp(t)
 	a.ImportLinks("socks://127.0.0.1:9#a", "")
 	defer runningFake(t, a, a.State.Nodes[0].ID)()
 	commitFake(a, a.planned)
@@ -40,7 +40,7 @@ func TestChangeWaitsForCoreFiles(t *testing.T) {
 // A wait that ends with nothing to change (another node, then back), the core still serving
 // it, connects through it.
 func TestWaitEndsWithoutChange(t *testing.T) {
-	a, _, _ := newRegressionApp(t)
+	a, _, _ := newTestApp(t)
 	a.ImportLinks("socks://127.0.0.1:9#a\nsocks://127.0.0.1:10#b", "")
 	first := a.State.Nodes[0].ID
 	defer runningFake(t, a, first)()
@@ -66,7 +66,7 @@ func TestWaitEndsWithoutChange(t *testing.T) {
 // LAN access applies to the dedicated ports with the rest of the settings while connected: the core
 // restarts once, on applying. Without a connection the ports follow it at once.
 func TestLANRestartsOnce(t *testing.T) {
-	a, _, _ := newRegressionApp(t)
+	a, _, _ := newTestApp(t)
 	a.ImportLinks("socks://127.0.0.1:9#a\nsocks://127.0.0.1:10#b", "")
 	p, _ := freePort()
 	if err := a.SetNodePort(a.State.Nodes[1].ID, p); err != nil {
@@ -100,7 +100,7 @@ func TestLANRestartsOnce(t *testing.T) {
 
 // A setting of the TUN alone (its MTU) is pending like any other, and applying it restarts the core.
 func TestTUNSettingPending(t *testing.T) {
-	a, _, _ := newRegressionApp(t)
+	a, _, _ := newTestApp(t)
 	a.Elevated = true
 	placeholderCore(t, a)
 	a.CoreVersion = xray.MinTUNVersion
@@ -127,7 +127,7 @@ func TestTUNSettingPending(t *testing.T) {
 // Replacing the core files ends a latency test running: one through many nodes would hold the
 // replacement, and every change waiting for it, for minutes.
 func TestReplacementEndsLatencyTest(t *testing.T) {
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.latencyCancel = cancel

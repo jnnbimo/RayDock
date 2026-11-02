@@ -131,9 +131,6 @@ func deleteRunValue() error {
 	return nil
 }
 
-// UninstallArg asks RayDock, run by its uninstaller, to remove its start at logon (TaskHelper).
-const UninstallArg = "--uninstall-autostart"
-
 // CleanupAutostart removes the logon entries that start exe, as RayDock is uninstalled: the Run value
 // and the logon task, which needs administrator rights, asked once through UAC. Entries of another
 // installation are left alone.
@@ -230,22 +227,11 @@ func applyTask(create bool, exe, sid string) error {
 	return deleteTask(taskName)
 }
 
-// TaskHelper does the change of start at logon RayDock is run for without its window, when args ask
-// for one: the change of the logon task an unelevated RayDock asked for through UAC (changeTask), or the
-// removal of its entries by the uninstaller (CleanupAutostart). It reports whether they did, and the exit
-// code, 0 or the failure's HRESULT.
+// TaskHelper does the change of the logon task an unelevated RayDock asked for through UAC (changeTask),
+// when args ask for one, without a window. It reports whether they did, and the exit code, 0 or the
+// failure's HRESULT.
 func TaskHelper(args []string) (code int, ok bool) {
 	for _, a := range args {
-		if a == UninstallArg {
-			exe, err := os.Executable()
-			if err == nil {
-				err = CleanupAutostart(exe)
-			}
-			if err != nil {
-				return 1, true
-			}
-			return 0, true
-		}
 		sid, found := strings.CutPrefix(a, taskHelperArg)
 		if !found {
 			continue

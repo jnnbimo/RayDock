@@ -24,7 +24,7 @@ func TestIntegrationPrivateDirect(t *testing.T) {
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestIntegrationPrivateDirect(t *testing.T) {
 	}
 
 	a.Connect(a.State.Nodes[0].ID, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 	if a.Conn != StateOn {
 		t.Fatal(a.ConnErr)
 	}
@@ -73,7 +73,7 @@ func TestIntegrationPrivateDirect(t *testing.T) {
 	a.SettingChanged()
 	a.Reconnect()
 	waitOperation(t, a.coreDo(func() {})) // the core restarted
-	drainRegression(posts)
+	drainPosts(posts)
 	if !a.running.opts.AllowLAN || a.SettingsDirty {
 		t.Fatal("the LAN setting was not applied")
 	}

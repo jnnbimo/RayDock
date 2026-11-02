@@ -225,10 +225,6 @@ func New(d Deps, st store.State) *App {
 	}
 	a.coreCtx, a.coreCancel = context.WithCancel(ctx)
 	a.loadTraffic()
-	if d.DataDir != "" {
-		// RayDock 0.1.3's front core config, which no core reads any more.
-		_ = os.Remove(filepath.Join(d.DataDir, "front.json"))
-	}
 	return a
 }
 

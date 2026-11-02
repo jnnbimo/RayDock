@@ -4,12 +4,9 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"time"
 
 	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
-
-	"raydock/internal/app"
 )
 
 // glowBitmap precomputes a soft glow instead of blurring it on every frame.
@@ -108,42 +105,11 @@ func (p palette) popup(e ui.Element) ui.Element {
 		Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.22))
 }
 
-func (a *View) toasts(c *ui.Context) {
-	p, t := a.pal, a.theme
-	w, _ := c.Size()
-	ui.ToastViewportBase(c, func(viewport ui.Element, toasts []ui.Toast) {
-		viewport.Padding(0, 0, t.Space(6), 0).AlignItems(ui.Center).Gap(t.Space(2))
-		for _, ts := range toasts {
-			toast := ui.ToastBase(c, ts)
-			box := p.popup(toast.Root.Row().AlignItems(ui.Center).Padding(t.Space(2.5), t.Space(4)).Radius(t.Radius + 4).
-				MaxWidth(w - t.Space(12)))
-			const fade = 200 * time.Millisecond
-			if left := toast.Left(); left > 0 && left < fade {
-				box.Opacity(float32(left) / float32(fade))
-				c.AnimationFrame()
-			} else if left > 0 {
-				c.After(left - fade)
-			}
-			box.Children(func() { ui.Text(c, ts.Title).TextColor(p.text) })
-		}
-	})
-}
-
 // Reserve the selection border so choosing or hovering never shifts layout.
 func choosable(e ui.Element) ui.Element { return e.Border(1, ui.Transparent) }
 
 func (p palette) chosen(e ui.Element) ui.Element {
 	return lift(p.dark, e.Material(glass.Glass{Tint: p.fillOn}).Border(1, raisedEdge(p.dark, p.border)))
-}
-
-func (p palette) powerColor(conn app.ConnState) (ui.Color, string) {
-	switch conn {
-	case app.StateOn:
-		return p.danger, "断开连接"
-	case app.StateConnecting:
-		return p.warning, "取消连接"
-	}
-	return p.success, "连接"
 }
 
 func (p palette) signalGlass(e ui.Element, col ui.Color, hovered bool) ui.Element {

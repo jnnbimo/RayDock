@@ -140,25 +140,6 @@ func buildPorts(o Options, r Run) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// ports are the parts serving the dedicated ports.
-type ports struct{ inbounds, outbounds, rules []any }
-
-// dedicated returns the parts serving routes, their chains' first hops bound to local, if any. A chain
-// the same as another's shares its outbounds (nodeOutbounds).
-func dedicated(routes []PortRoute, lan bool, local *Local) (ports, error) {
-	var p ports
-	for _, r := range routes {
-		chain, tag, err := nodeOutbounds(r.Chain, local)
-		if err != nil {
-			return ports{}, fmt.Errorf("端口 %d：%w", r.Port, err)
-		}
-		p.outbounds = addOutbounds(p.outbounds, chain)
-		p.inbounds = append(p.inbounds, portInbound(r.Port, lan))
-		p.rules = append(p.rules, obj{"type": "field", "inboundTag": []string{portTag(r.Port)}, "outboundTag": tag})
-	}
-	return p, nil
-}
-
 // addOutbounds appends those of outs whose tag list lacks.
 func addOutbounds(list, outs []any) []any {
 	for _, o := range outs {

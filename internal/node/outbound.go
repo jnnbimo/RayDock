@@ -1,6 +1,7 @@
 package node
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,7 +77,7 @@ func fromOutbound(o map[string]any, name string) (n Node, ok bool, err error) {
 		return n, false, fmt.Errorf("不支持的出站协议 %q", proto)
 	}
 	tag := str(o["tag"])
-	n.Name = first(name, tag)
+	n.Name = cmp.Or(name, tag)
 	if name != "" && tag != "" && tag != "proxy" {
 		n.Name = name + " · " + tag
 	}
@@ -101,7 +102,7 @@ func fromOutbound(o map[string]any, name string) (n Node, ok bool, err error) {
 
 	// Transport and security only serve display and the latency test.
 	if ss, _ := o["streamSettings"].(map[string]any); ss != nil {
-		raw := strings.ToLower(first(str(ss["network"]), str(ss["method"])))
+		raw := strings.ToLower(cmp.Or(str(ss["network"]), str(ss["method"])))
 		if n.Network, err = network(raw); err != nil {
 			n.Network, err = raw, nil // protocol-specific transports such as hysteria and masque
 		}

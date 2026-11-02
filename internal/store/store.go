@@ -98,38 +98,7 @@ func Load(path string) (State, error) {
 	if st.Settings.LogLevel == "" {
 		st.Settings.LogLevel = def.LogLevel
 	}
-	migrateGroups(&st, data)
 	return st, nil
-}
-
-// migrateGroups maps legacy subscriptions and ungrouped nodes to groups.
-func migrateGroups(st *State, data []byte) {
-	var legacy struct {
-		Subs  []Group `json:"subscriptions"`
-		Nodes []struct {
-			SubID string `json:"subId"`
-		} `json:"nodes"`
-	}
-	_ = json.Unmarshal(data, &legacy)
-	if st.Groups == nil {
-		st.Groups = legacy.Subs
-	}
-	manual := ""
-	for i := range st.Nodes {
-		n := &st.Nodes[i]
-		if n.GroupID != "" {
-			continue
-		}
-		if i < len(legacy.Nodes) && legacy.Nodes[i].SubID != "" {
-			n.GroupID = legacy.Nodes[i].SubID
-			continue
-		}
-		if manual == "" {
-			manual = node.NewID()
-			st.Groups = append(st.Groups, Group{ID: manual, Name: DefaultGroup})
-		}
-		n.GroupID = manual
-	}
 }
 
 // Save writes a temporary file and renames it, so a crash never leaves a corrupt file.

@@ -60,7 +60,9 @@ const prepareUninstallArg = "--prepare-uninstall"
 
 // prepareUninstall acquires the application lock only after the running instance completed Shutdown.
 // Errors propagate to NSIS before it deletes any installation files or registration metadata.
-func prepareUninstall() error {
+// It moves no data: the proxy backup is restored from the data directory, and from an earlier
+// version's directory that was never moved.
+func prepareUninstall(dataDir string) error {
 	deadline := time.Now().Add(35 * time.Second)
 	for !mygo.App.RequestSingleInstanceLock() {
 		if time.Now().After(deadline) {
@@ -68,12 +70,13 @@ func prepareUninstall() error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	dataDir, err := mygo.App.Path(mygo.PathUserData)
-	if err != nil {
-		return err
-	}
-	if err = app.RestoreProxyBackup(dataDir, winProxy{}); err != nil {
-		return err
+	for _, dir := range []string{dataDir, store.LegacyDataDir()} {
+		if dir == "" {
+			continue
+		}
+		if err := app.RestoreProxyBackup(dir, winProxy{}); err != nil {
+			return err
+		}
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -83,12 +86,17 @@ func prepareUninstall() error {
 }
 
 func main() {
-	if slices.Contains(os.Args[1:], prepareUninstallArg) || slices.Contains(os.Args[1:], system.UninstallArg) {
-		if err := prepareUninstall(); err != nil {
+	dataDir, err := store.DataDir()
+	if err != nil {
+		fatal(err)
+	}
+	// MyGo keeps its own files (window-state.json) there too.
+	mygo.App.SetPath(mygo.PathUserData, dataDir)
+	if slices.Contains(os.Args[1:], prepareUninstallArg) {
+		if err := prepareUninstall(dataDir); err != nil {
 			log.Print(err)
-			if dir, e := mygo.App.Path(mygo.PathUserData); e == nil {
-				_ = os.MkdirAll(dir, 0700)
-				_ = os.WriteFile(filepath.Join(dir, "uninstall-error.txt"), []byte(err.Error()+"\n"), 0600)
+			if os.MkdirAll(dataDir, 0o700) == nil {
+				_ = os.WriteFile(filepath.Join(dataDir, "uninstall-error.txt"), []byte(err.Error()+"\n"), 0o600)
 			}
 			os.Exit(1)
 		}
@@ -105,9 +113,9 @@ func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance gets OnSecondInstance
 	}
-	dataDir, err := mygo.App.Path(mygo.PathUserData)
+	moveWarning, err := store.PrepareDataDir(dataDir)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	selfExe, _ := os.Executable()
 	// The installer ships the core in resources\core (resources/windows-amd64/core in the repo).
@@ -117,7 +125,7 @@ func main() {
 	}
 	st, err := loadState(filepath.Join(dataDir, "state.json"))
 	if err != nil {
-		log.Fatal(err) // never create a writable app after a failed read or backup
+		fatal(err) // never create a writable app after a failed read or backup
 	}
 
 	// win is the latest main window. Software-rendered windows stay hidden in
@@ -164,6 +172,9 @@ func main() {
 		BundledCore: bundledCore,
 		Version:     mygo.App.Version(),
 	}, st)
+	if moveWarning != nil {
+		a.QueueLog("[RayDock] " + moveWarning.Error())
+	}
 	applyAppearance(st.Settings.Appearance)
 
 	mygo.App.WhenReady(func() {
@@ -242,7 +253,7 @@ func main() {
 			w.Focus()
 		}
 		mygo.App.OnSecondInstance(func(argv []string, _ string) {
-			if slices.Contains(argv, prepareUninstallArg) || slices.Contains(argv, system.UninstallArg) {
+			if slices.Contains(argv, prepareUninstallArg) {
 				mygo.App.Quit()
 				return
 			}
@@ -280,6 +291,12 @@ func main() {
 	if runErr != nil {
 		log.Fatal(runErr)
 	}
+}
+
+// fatal reports an error that keeps RayDock from starting, before it has a window, and exits.
+func fatal(err error) {
+	system.ShowError("RayDock 无法启动", err.Error())
+	log.Fatal(err)
 }
 
 // loadState reads saved data, renaming a corrupt file aside so it is not overwritten.

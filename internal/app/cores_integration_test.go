@@ -20,7 +20,7 @@ func TestIntegrationKeptCoreOpensListeners(t *testing.T) {
 	if root == "" {
 		t.Skip("set RAYDOCK_CORE_DIR to an existing core")
 	}
-	a, posts, _ := newRegressionApp(t)
+	a, posts, _ := newTestApp(t)
 	if err := xray.CopyCore(root, a.CoreDir(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestIntegrationKeptCoreOpensListeners(t *testing.T) {
 	a.State.Settings.Port, a.State.Settings.SystemProxy = port, false
 	a.ImportLinks("socks://127.0.0.1:9#node", "")
 	a.Connect(a.State.Nodes[0].ID, nil)
-	waitRegression(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
+	waitFor(t, posts, func() bool { return a.Conn == StateOn || a.ConnErr != "" })
 	if a.Conn != StateOn {
 		t.Fatal(a.ConnErr)
 	}

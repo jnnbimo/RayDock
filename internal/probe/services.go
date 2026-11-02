@@ -87,13 +87,12 @@ var IPInfoURL = "https://my.ippure.com/v1/info"
 
 // IPInfo describes an exit IP, in IPPure's words.
 type IPInfo struct {
-	IP          string `json:"ip"`
-	ASN         int    `json:"asn"`
-	ASOrg       string `json:"asOrganization"`
-	Country     string `json:"country"`
-	CountryCode string `json:"countryCode"`
-	Region      string `json:"region"`
-	City        string `json:"city"`
+	IP      string `json:"ip"`
+	ASN     int    `json:"asn"`
+	ASOrg   string `json:"asOrganization"`
+	Country string `json:"country"`
+	Region  string `json:"region"`
+	City    string `json:"city"`
 	// FraudScore is IPPure's risk score of the IP, from 0 to 100: the higher, the more sites distrust it.
 	FraudScore  *int `json:"fraudScore"`
 	Residential bool `json:"isResidential"` // a home ISP's, not a data center's

@@ -44,6 +44,4 @@ func SetAutostart(StartMode, string) error { return errors.New("当前平台暂�
 // AdminAutostartRisk finds no risk where there is no start at logon.
 func AdminAutostartRisk(string) error { return nil }
 
-const UninstallArg = "--uninstall-autostart"
-
 func CleanupAutostart(string) error { return nil }

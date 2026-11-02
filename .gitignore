@@ -5,8 +5,7 @@
 # Local credentials and user state
 .env
 .env.*
-/state.json
-/state.json.*
+/data/
 
 # Editor and OS files
 /.idea/

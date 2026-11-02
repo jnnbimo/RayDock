@@ -1,6 +1,7 @@
 package node
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -269,7 +270,7 @@ func clashStream(n *Node, c clashMap, defaultSecurity string) error {
 	case "xhttp":
 		o := c.sub("xhttp-opts")
 		n.Network, n.Path, n.Mode = "xhttp", o.str("path"), o.str("mode")
-		n.HostHeader = first(o.str("host"), o.sub("headers").header("Host"))
+		n.HostHeader = cmp.Or(o.str("host"), o.sub("headers").header("Host"))
 	default:
 		var err error
 		if n.Network, err = network(nw); err != nil {

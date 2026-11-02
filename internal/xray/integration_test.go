@@ -6,6 +6,7 @@
 package xray
 
 import (
+	"cmp"
 	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -338,7 +339,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 			if !cli.Running() {
 				t.Fatal("client not running")
 			}
-			target := first(targets[tc.name], l.Addr().String())
+			target := cmp.Or(targets[tc.name], l.Addr().String())
 			// Through the HTTP side of the probe's inbound.
 			d, err := probe.ViaProxy(context.Background(), port, "http://"+target+"/generate_204", 10*time.Second)
 			if err != nil {
@@ -615,7 +616,7 @@ func TestIntegrationEndToEnd(t *testing.T) {
 		}
 		defer cli.Stop()
 		for i, name := range names {
-			target := first(targets[name], l.Addr().String())
+			target := cmp.Or(targets[name], l.Addr().String())
 			d, err := probe.Through(context.Background(), routes[i].Port, "http://"+target+"/generate_204", 10*time.Second)
 			if err != nil {
 				t.Fatalf("%s: %v\nserver log:\n%s", name, err, srvLog.String())

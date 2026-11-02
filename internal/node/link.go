@@ -1,6 +1,7 @@
 package node
 
 import (
+	"cmp"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -39,7 +40,7 @@ func shareLink(n *Node) string {
 	switch n.Protocol {
 	case VLESS:
 		q := streamQuery(n)
-		q.add("encryption", first(n.Encryption, "none"))
+		q.add("encryption", cmp.Or(n.Encryption, "none"))
 		q.add("flow", n.Flow)
 		return "vless://" + escape(n.UUID) + "@" + hostport + q.String() + name
 	case Trojan:
@@ -106,7 +107,7 @@ func shareLink(n *Node) string {
 func vmessLink(n *Node) string {
 	m := map[string]string{
 		"v": "2", "ps": n.Name, "add": n.Host, "port": strconv.Itoa(n.Port), "id": n.UUID,
-		"aid": strconv.Itoa(n.AlterID), "scy": n.Cipher, "net": first(n.Network, "tcp"), "type": n.HeaderType,
+		"aid": strconv.Itoa(n.AlterID), "scy": n.Cipher, "net": cmp.Or(n.Network, "tcp"), "type": n.HeaderType,
 		"host": n.HostHeader, "path": n.Path, "sni": n.SNI, "alpn": n.ALPN, "fp": n.Fingerprint,
 	}
 	switch n.Network {
@@ -166,7 +167,7 @@ func streamQuery(n *Node) query {
 // extraStream writes the transport parameters of protocols that usually go without (Shadowsocks and
 // SOCKS, which panels such as 3x-ui may extend): none for plain TCP.
 func extraStream(n *Node) query {
-	if first(n.Network, "tcp") == "tcp" && first(n.Security, "none") == "none" && n.HeaderType == "" && n.FinalMask == "" {
+	if cmp.Or(n.Network, "tcp") == "tcp" && cmp.Or(n.Security, "none") == "none" && n.HeaderType == "" && n.FinalMask == "" {
 		return nil
 	}
 	return streamQuery(n)

@@ -1,13 +1,7 @@
 package xray
 
 import (
-	"context"
-	"crypto/sha256"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,64 +56,62 @@ func TestCopyCoreKeeps(t *testing.T) {
 	}
 }
 
-func TestInstallGeo(t *testing.T) {
-	files := map[string]string{"geoip.dat": "ip data", "geosite.dat": "site data"}
-	broken := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/latest" {
-			w.Write([]byte(`{"tag_name": "202610132213"}`))
-			return
-		}
-		name := path.Base(r.URL.Path)
-		if !strings.HasPrefix(r.URL.Path, "/download/202610132213/") {
-			http.NotFound(w, r)
-			return
-		}
-		if base, ok := strings.CutSuffix(name, ".sha256sum"); ok {
-			sum := sha256.Sum256([]byte(files[base]))
-			fmt.Fprintf(w, "%x  %s\n", sum, base)
-			return
-		}
-		data := files[name]
-		if broken && name == "geosite.dat" {
-			data = "tampered"
-		}
-		w.Write([]byte(data))
-	}))
-	defer srv.Close()
-	geoAPI, geoDownloads = srv.URL+"/latest", srv.URL+"/download/"
-	ctx := context.Background()
-	tag, err := LatestGeo(ctx, srv.Client())
-	if err != nil || tag != "202610132213" {
-		t.Fatalf("tag %q %v", tag, err)
+func TestPickRelease(t *testing.T) {
+	list := `[
+		{"tag_name":"v27.0.0","draft":true,"assets":[{"name":"X.zip","browser_download_url":"d"},{"name":"X.zip.dgst","browser_download_url":"d"}]},
+		{"tag_name":"v26.10.11","prerelease":true,"assets":[{"name":"Other.zip","browser_download_url":"o"}]},
+		{"tag_name":"v26.10.10","prerelease":true,"assets":[{"name":"X.zip","browser_download_url":"z"},{"name":"X.zip.dgst","browser_download_url":"g"}]},
+		{"tag_name":"v26.3.27","assets":[{"name":"X.zip","browser_download_url":"old"},{"name":"X.zip.dgst","browser_download_url":"old"}]}
+	]`
+	rel, err := pickRelease(strings.NewReader(list), "X.zip")
+	if err != nil || rel != (Release{Tag: "v26.10.10", ZipURL: "z", DgstURL: "g"}) {
+		t.Fatalf("%+v %v", rel, err)
 	}
-	dir := t.TempDir()
-	var last, lastTotal int64
-	if err := InstallGeo(ctx, srv.Client(), tag, dir, func(done, total int64) {
-		if done < last || done > total {
-			t.Errorf("progress went from %d to %d/%d", last, done, total)
-		}
-		last, lastTotal = done, total
-	}); err != nil {
+	if _, err := pickRelease(strings.NewReader(`[]`), "X.zip"); err == nil {
+		t.Error("no usable release should fail")
+	}
+}
+
+func TestParseDigest(t *testing.T) {
+	d, err := parseDigest(strings.NewReader("MD5= 3a\nSHA1= 42\nSHA2-256= d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad\nSHA2-512= 5b\n"))
+	if err != nil || d != "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad" {
+		t.Fatalf("%q %v", d, err)
+	}
+}
+
+func TestCopyGeoIsIndependentAndTransactional(t *testing.T) {
+	dir, src := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ExeName()), []byte("keep executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range files {
-		if b, _ := os.ReadFile(filepath.Join(dir, name)); string(b) != want {
-			t.Errorf("%s = %q", name, b)
+	for _, name := range GeoFiles {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if last != lastTotal {
-		t.Errorf("progress ended at %d/%d", last, lastTotal)
+	if err := os.WriteFile(filepath.Join(src, GeoFiles[0]), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// A file failing its checksum replaces nothing.
-	files["geoip.dat"], broken = "newer ip", true
-	if err := InstallGeo(ctx, srv.Client(), tag, dir, nil); err == nil || !strings.Contains(err.Error(), "校验失败") {
-		t.Fatalf("tampered download: %v", err)
+	if err := CopyGeo(src, dir); err == nil {
+		t.Fatal("an incomplete rule set was committed")
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "geoip.dat")); string(b) != "ip data" {
-		t.Errorf("geoip.dat replaced although geosite.dat failed: %q", b)
+	for _, name := range GeoFiles {
+		if data, _ := os.ReadFile(filepath.Join(dir, name)); string(data) != "old" {
+			t.Fatalf("incomplete download changed %s", name)
+		}
 	}
-	if left, _ := filepath.Glob(filepath.Join(dir, "*.new")); len(left) > 0 {
-		t.Errorf("temp files left: %v", left)
+	if err := os.WriteFile(filepath.Join(src, GeoFiles[1]), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyGeo(src, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range GeoFiles {
+		if data, _ := os.ReadFile(filepath.Join(dir, name)); string(data) != "new" {
+			t.Fatalf("%s was not committed", name)
+		}
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, ExeName())); string(data) != "keep executable" {
+		t.Fatal("rule update changed the executable")
 	}
 }

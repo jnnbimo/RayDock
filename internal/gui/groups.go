@@ -286,15 +286,3 @@ func (a *View) labeled(c *ui.Context, label string, field func()) {
 		field()
 	})
 }
-
-func ago(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return "刚刚"
-	case d < time.Hour:
-		return fmt.Sprintf("%d 分钟前", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%d 小时前", int(d.Hours()))
-	}
-	return fmt.Sprintf("%d 天前", int(d.Hours()/24))
-}
