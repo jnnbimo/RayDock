@@ -26,7 +26,7 @@ func TestSystemRunEntry(t *testing.T) {
 			_ = k.SetStringValue(runValue, prev)
 			k.Close()
 		} else {
-			_ = deleteRunValue()
+			_ = deleteValue(runKey)
 		}
 	})
 

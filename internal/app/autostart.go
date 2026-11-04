@@ -13,9 +13,7 @@ func (a *App) LoadAutostart() {
 		return
 	}
 	a.StartBusy = true
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		m, risk := a.Autostart.Get(), a.Autostart.AdminRisk()
 		a.Post(func() {
 			a.StartMode, a.StartBusy = m, false
@@ -24,7 +22,7 @@ func (a *App) LoadAutostart() {
 				a.QueueLog("[RayDock] " + a.StartErr)
 			}
 		})
-	}()
+	})
 }
 
 // SetAutostart switches the start-at-logon mode. The admin mode may show a UAC
@@ -34,9 +32,7 @@ func (a *App) SetAutostart(m system.StartMode) {
 		return
 	}
 	a.StartBusy, a.StartErr = true, ""
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		err := a.Autostart.Set(m)
 		got := a.Autostart.Get()
 		a.Post(func() {
@@ -49,5 +45,5 @@ func (a *App) SetAutostart(m system.StartMode) {
 				a.QueueLog("[RayDock] " + a.StartErr)
 			}
 		})
-	}()
+	})
 }

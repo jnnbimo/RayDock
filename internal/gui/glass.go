@@ -95,8 +95,13 @@ func (a *View) backdropIn(c *ui.Context, frame func(ui.Rect) ui.Rect, body func(
 	}).Children(body)
 }
 
+// paneClarity lets the backdrop's light read through the window's base panes, the page cards and the
+// sidebar's connection panel (and the tray menu, which looks as it does), so they look like glass rather
+// than frosted cards; clearer, they would vanish into the light theme's backdrop.
+const paneClarity = 0.6
+
 func (p palette) pane(e ui.Element) ui.Element {
-	return e.Material(glass.Glass{}).Border(1, p.border)
+	return e.Material(glass.Glass{Clarity: paneClarity}).Border(1, p.border)
 }
 
 // popup shares the tint, rim and shadow of floating surfaces.

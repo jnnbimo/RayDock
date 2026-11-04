@@ -35,7 +35,7 @@ func TestSoftwareGlassPreserved(t *testing.T) {
 							panel.Material(glass.Glass{Tint: p.bg.Alpha(0.22)}).Border(1, raisedEdge(p.dark, p.border)).
 								Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.22))
 						case reference:
-							panel.Material(glass.Glass{}).Border(1, p.border)
+							panel.Material(glass.Glass{Clarity: paneClarity}).Border(1, p.border)
 						case popup:
 							p.popup(panel)
 						default:

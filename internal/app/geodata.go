@@ -21,9 +21,7 @@ func (a *App) UpdateGeo() {
 	}
 	a.GeoBusy, a.GeoProgress, a.GeoErr, a.GeoMsg = true, 0, "", ""
 	client, dir, current := a.httpClient(0), a.geoDownloadDir(), a.State.GeoTag
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		defer client.CloseIdleConnections()
 		ctx, cancel := context.WithTimeout(a.workCtx, 10*time.Minute)
 		defer cancel()
@@ -34,14 +32,7 @@ func (a *App) UpdateGeo() {
 				err = os.MkdirAll(dir, 0o755)
 			}
 			if err == nil {
-				last := time.Now()
-				err = a.CoreSource.InstallGeo(ctx, client, tag, dir, func(done, total int64) {
-					if total > 0 && (time.Since(last) > 100*time.Millisecond || done == total) {
-						last = time.Now()
-						p := float64(done) / float64(total)
-						a.Post(func() { a.GeoProgress = p })
-					}
-				})
+				err = a.CoreSource.InstallGeo(ctx, client, tag, dir, a.progress(func(p float64) { a.GeoProgress = p }))
 			}
 		}
 		a.Post(func() {
@@ -61,7 +52,7 @@ func (a *App) UpdateGeo() {
 				})
 			})
 		})
-	}()
+	})
 }
 
 func (a *App) geoDownloadDir() string { return filepath.Join(a.DataDir, "geo-download") }

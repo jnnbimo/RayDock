@@ -8,7 +8,7 @@ Function un.PrepareRayDock
   StrCmp $0 0 done
   failed:
     SetErrorLevel 1
-    MessageBox MB_OK|MB_ICONSTOP "无法完成 RayDock 的退出、代理恢复或自启清理，卸载已停止。请确认 UAC、退出程序后重试。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "无法完成 RayDock 的退出、代理恢复或自启清理，卸载已停止。原因记录在 $INSTDIR\data\uninstall-error.txt。请确认 UAC、退出程序后重试。" /SD IDOK
     Abort
   done:
 FunctionEnd

@@ -75,7 +75,7 @@ func (a *App) CheckOverview(again bool) {
 			}
 		})
 	}
-	go func() {
+	a.jobs.Go(func() {
 		info, err := probe.ExitInfo(ctx, port, checkTimeout)
 		post(func(o *Overview) {
 			o.IPTesting, o.IP, o.IPErr = false, info, ""
@@ -83,9 +83,9 @@ func (a *App) CheckOverview(again bool) {
 				o.IPErr = shortErr(err)
 			}
 		})
-	}()
+	})
 	for i, s := range probe.Services {
-		go func() {
+		a.jobs.Go(func() {
 			r, err := probe.CheckService(ctx, port, s, checkTimeout)
 			post(func(o *Overview) {
 				c := &o.Services[i]
@@ -94,6 +94,6 @@ func (a *App) CheckOverview(again bool) {
 					c.Err = shortErr(err)
 				}
 			})
-		}()
+		})
 	}
 }

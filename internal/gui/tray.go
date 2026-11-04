@@ -162,7 +162,7 @@ func (m *trayMenu) build(c *ui.Context) {
 	}, func() {
 		// The system draws the flyout's rounded corners and outline: the glass fills it.
 		ui.Column(c).Fill().Background(p.fill).Children(func() {
-			ui.Column(c).Fill().Padding(trayPad).Material(glass.Glass{}).Children(func() {
+			ui.Column(c).Fill().Padding(trayPad).Material(glass.Glass{Clarity: paneClarity}).Children(func() {
 				// The controls of the sidebar's connection panel, which change where they are and leave the
 				// menu open, as a menu's check marks do; the window's panel then shows them changed too.
 				ui.Column(c).Gap(trayGap).Padding(trayPad).Children(func() { a.connectionControls(c, true) })

@@ -77,9 +77,7 @@ func (a *App) EnsureCore() {
 	if a.bundledReady() {
 		bundledExe = filepath.Join(a.BundledCore, xray.ExeName())
 	}
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		v, err := readVersion(exe)
 		bv := ""
 		if err == nil && bundledExe != "" {
@@ -114,7 +112,7 @@ func (a *App) EnsureCore() {
 			a.SyncCores()
 			a.PinCertificates()
 		})
-	}()
+	})
 }
 
 // CheckCoreUpdate looks for a newer official release, when the user asks: it offers one (CoreLatest) and
@@ -125,9 +123,7 @@ func (a *App) CheckCoreUpdate() {
 	}
 	a.CoreChecking, a.CoreNote = true, ""
 	revision, current, client := a.coreRevision, a.CoreVersion, a.httpClient(0)
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		defer client.CloseIdleConnections()
 		ctx, cancel := context.WithTimeout(a.workCtx, 30*time.Second)
 		defer cancel()
@@ -147,7 +143,7 @@ func (a *App) CheckCoreUpdate() {
 				a.CoreNote = "已是最新版本"
 			}
 		})
-	}()
+	})
 }
 
 func (a *App) coreUsable(tun bool) bool {
@@ -198,15 +194,20 @@ func (a *App) InstallCore() {
 		if err := os.RemoveAll(dir); err != nil {
 			return "", err
 		}
-		last := time.Now()
-		return dir, a.CoreSource.Install(ctx, client, rel, dir, func(done, total int64) {
-			if total > 0 && (time.Since(last) > 100*time.Millisecond || done == total) {
-				last = time.Now()
-				p := float64(done) / float64(total)
-				a.Post(func() { a.CoreProgress = p })
-			}
-		})
+		return dir, a.CoreSource.Install(ctx, client, rel, dir, a.progress(func(p float64) { a.CoreProgress = p }))
 	})
+}
+
+// progress reports a download's progress, on the UI thread to set, at most every 100 ms and at its end.
+func (a *App) progress(set func(float64)) func(done, total int64) {
+	last := time.Now()
+	return func(done, total int64) {
+		if total > 0 && (time.Since(last) > 100*time.Millisecond || done == total) {
+			last = time.Now()
+			p := float64(done) / float64(total)
+			a.Post(func() { set(p) })
+		}
+	}
 }
 
 // downloadDir is where a core download is placed until it replaces the core.
@@ -233,9 +234,7 @@ func (a *App) coreJob(msg, verb string, prepare func(client *http.Client) (strin
 	a.coreRevision++ // invalidates any older release discovery result
 	a.CoreBusy, a.CoreProgress, a.CoreErr, a.CoreMsg = true, 0, "", msg
 	client := a.httpClient(0)
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		defer client.CloseIdleConnections()
 		src, err := prepare(client)
 		if err != nil {
@@ -248,7 +247,7 @@ func (a *App) coreJob(msg, verb string, prepare func(client *http.Client) (strin
 			}
 			a.replaceCore(verb, src)
 		})
-	}()
+	})
 }
 
 // replaceCore replaces the core files with those in src, while every core goes on running: Windows lets a
@@ -296,12 +295,10 @@ func (a *App) replaceFiles(replace func()) {
 	a.StopSpeedTest()
 	a.stopLatencyTest()
 	a.stopPinning()
-	a.jobs.Add(1)
-	go func() {
-		defer a.jobs.Done()
+	a.jobs.Go(func() {
 		a.tests.Wait()
 		a.Post(func() { a.coreDo(replace) })
-	}()
+	})
 }
 
 // coreDone ends a core job: installed tells whether the files were replaced, v is the version then

@@ -83,9 +83,7 @@ func (a *App) TestLatency(ids []string) error {
 	exe, strategy := a.coreExe(), a.State.Settings.DNSStrategy
 	ctx, cancel := context.WithCancel(a.workCtx)
 	a.latencyCancel = cancel
-	a.tests.Add(1)
-	go func() {
-		defer a.tests.Done()
+	a.tests.Go(func() {
 		defer cancel()
 		// Each result shows as soon as it is in.
 		a.measureLatency(ctx, exe, strategy, jobs, func(j latencyJob, l Latency) {
@@ -106,7 +104,7 @@ func (a *App) TestLatency(ids []string) error {
 				}
 			}
 		})
-	}()
+	})
 	return nil
 }
 
@@ -426,9 +424,7 @@ func (a *App) TestSpeed(ids []string) error {
 	ctx, cancel := context.WithCancel(a.workCtx)
 	a.SpeedBusy, a.speedCancel = true, cancel
 	exe, cfgPath, strategy := a.coreExe(), filepath.Join(a.DataDir, "speedtest.json"), a.State.Settings.DNSStrategy
-	a.tests.Add(1)
-	go func() {
-		defer a.tests.Done()
+	a.tests.Go(func() {
 		iface, ifaceErr := localnet.Find()
 		defer a.Post(func() {
 			cancel()
@@ -482,7 +478,7 @@ func (a *App) TestSpeed(ids []string) error {
 				}
 			})
 		}
-	}()
+	})
 	return nil
 }
 

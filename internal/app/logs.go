@@ -3,6 +3,7 @@ package app
 import (
 	"slices"
 	"strings"
+	"time"
 )
 
 func (a *App) QueueLog(line string) {
@@ -36,8 +37,32 @@ func (a *App) FlushLogs() bool {
 	return true
 }
 
-// LogsPending reports whether core output is waiting for FlushLogs.
-func (a *App) LogsPending() bool {
+// logFlush is how often queued output moves into Logs: a burst of core output repaints once.
+const logFlush = 200 * time.Millisecond
+
+// StartLogs moves queued output into Logs every logFlush until shutdown.
+func (a *App) StartLogs() {
+	if a.closing {
+		return
+	}
+	a.jobs.Go(func() {
+		t := time.NewTicker(logFlush)
+		defer t.Stop()
+		for {
+			select {
+			case <-a.workCtx.Done():
+				return
+			case <-t.C:
+			}
+			if a.logsPending() {
+				a.Post(func() { a.FlushLogs() })
+			}
+		}
+	})
+}
+
+// logsPending reports whether core output is waiting for FlushLogs.
+func (a *App) logsPending() bool {
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
 	return len(a.logQueued) > 0

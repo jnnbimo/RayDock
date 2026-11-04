@@ -42,9 +42,7 @@ func (a *App) PinCertificates(ids ...string) {
 	ctx, cancel := context.WithCancel(a.workCtx)
 	batch := &pinBatch{cancel: cancel}
 	a.pinJobs[batch] = true
-	a.tests.Add(1)
-	go func() {
-		defer a.tests.Done()
+	a.tests.Go(func() {
 		pins, errs := a.fetchPins(ctx, todo, fetch, strategy)
 		a.Post(func() {
 			delete(a.pinJobs, batch)
@@ -59,7 +57,7 @@ func (a *App) PinCertificates(ids ...string) {
 			}
 			a.pinned(todo, pins, errs)
 		})
-	}()
+	})
 }
 
 // Default batches serialize ownership of the dedicated resolver core; latency tests own another core.

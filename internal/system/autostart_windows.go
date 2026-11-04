@@ -65,27 +65,34 @@ func SetAutostart(mode StartMode, exe string) error {
 		if err := changeTask(true, exe); err != nil {
 			return err
 		}
-	} else {
-		raw, err := readTaskDefinition(taskName)
-		if err != nil && !taskMissing(err) {
-			return err
-		}
-		if err == nil {
-			cmd, _ := parseTask(raw)
-			if cmd == "" {
-				return errors.New("无法核实 RayDock 自启任务的执行程序，请先检查并移除该任务")
-			}
-			if samePath(cmd, exe) {
-				if err := changeTask(false, exe); err != nil {
-					return err
-				}
-			}
-		}
+	} else if err := removeTask(exe); err != nil {
+		return err
 	}
 	if mode == StartUser {
 		return setRunValue(exe)
 	}
-	return deleteRunValue()
+	return deleteValue(runKey)
+}
+
+// removeTask deletes the logon task when it starts exe, asking for administrator rights once; a task of
+// another installation is left alone, one that cannot be read is not deleted unseen.
+func removeTask(exe string) error {
+	raw, err := readTaskDefinition(taskName)
+	if err != nil && !taskMissing(err) {
+		return err
+	}
+	if err == nil {
+		cmd, _ := parseTask(raw)
+		if cmd == "" {
+			return errors.New("无法核实 RayDock 自启任务的执行程序，请先检查并移除该任务")
+		}
+		if samePath(cmd, exe) {
+			if err := changeTask(false, exe); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func setRunValue(exe string) error {
@@ -97,27 +104,13 @@ func setRunValue(exe string) error {
 	if err := k.SetStringValue(runValue, fmt.Sprintf("%q %s", exe, AutostartArg)); err != nil {
 		return err
 	}
-	return clearStartupApproval()
+	// Clear a disabled mark left by Task Manager. Access failures must not masquerade as re-enablement.
+	return deleteValue(approvedKey)
 }
 
-// Clear a disabled mark left by Task Manager. Access failures must not masquerade as re-enablement.
-func clearStartupApproval() error {
-	k, err := registry.OpenKey(registry.CURRENT_USER, approvedKey, registry.SET_VALUE)
-	if errors.Is(err, registry.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer k.Close()
-	if err = k.DeleteValue(runValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-func deleteRunValue() error {
-	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
+// deleteValue removes RayDock's value from key; a value or key that is not there is no error.
+func deleteValue(key string) error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, key, registry.SET_VALUE)
 	if errors.Is(err, registry.ErrNotExist) {
 		return nil
 	}
@@ -135,20 +128,8 @@ func deleteRunValue() error {
 // and the logon task, which needs administrator rights, asked once through UAC. Entries of another
 // installation are left alone.
 func CleanupAutostart(exe string) error {
-	raw, err := readTaskDefinition(taskName)
-	if err != nil && !taskMissing(err) {
+	if err := removeTask(exe); err != nil {
 		return err
-	}
-	if err == nil {
-		cmd, _ := parseTask(raw)
-		if cmd == "" {
-			return errors.New("无法核实 RayDock 自启任务的执行程序，请先检查并移除该任务")
-		}
-		if samePath(cmd, exe) {
-			if err := changeTask(false, exe); err != nil {
-				return err
-			}
-		}
 	}
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.QUERY_VALUE)
 	if errors.Is(err, registry.ErrNotExist) {
@@ -168,10 +149,10 @@ func CleanupAutostart(exe string) error {
 	if !samePath(commandExe(v), exe) {
 		return nil
 	}
-	if err := clearStartupApproval(); err != nil {
+	if err := deleteValue(approvedKey); err != nil {
 		return err
 	}
-	return deleteRunValue()
+	return deleteValue(runKey)
 }
 
 // disabledInTaskManager reads the StartupApproved flag: an odd first byte

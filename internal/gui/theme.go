@@ -12,7 +12,7 @@ type palette struct {
 	dark                     bool
 	bg                       ui.Color    // the window's own color, under the backdrop, and the scroll edges'
 	backdrop                 [2]ui.Color // the window's gradient, from its top left to its bottom right
-	glows                    [4]glow     // the light the glass refracts (ambient)
+	glows                    [4]glow     // the light the glass refracts (ambient): one neutral tone, lighter and darker, as Mica's
 	fill, fillHover, fillOn  ui.Color    // frosted controls on the glass: inputs, buttons, chosen segments
 	border, text, muted      ui.Color
 	faint                    ui.Color // dividers; border is also the rim drawn around glass
@@ -37,16 +37,16 @@ func newPalette(dark bool) palette {
 		p.success, p.warning, p.danger = ui.Hex("#059669"), ui.Hex("#d97706"), ui.Hex("#e11d48")
 	}
 	if dark {
-		p.bg, p.backdrop = ui.Hex("#0b0f24"), [2]ui.Color{ui.Hex("#0d1335"), ui.Hex("#1f0d36")}
-		p.glows = [4]glow{{ui.Hex("#4f46e5"), 0.85}, {ui.Hex("#06b6d4"), 0.6}, {ui.Hex("#9333ea"), 0.7}, {ui.Hex("#db2777"), 0.45}}
+		p.bg, p.backdrop = ui.Hex("#1b1d22"), [2]ui.Color{ui.Hex("#1e2026"), ui.Hex("#1a1c21")}
+		p.glows = [4]glow{{ui.Hex("#3a3f4b"), 0.9}, {ui.Hex("#2e323c"), 0.8}, {ui.Hex("#343844"), 0.7}, {ui.Hex("#121317"), 0.8}}
 		white := ui.Hex("#ffffff")
 		p.fill, p.fillHover, p.fillOn = white.Alpha(0.08), white.Alpha(0.14), white.Alpha(0.2)
 		p.border, p.faint = white.Alpha(0.22), white.Alpha(0.12)
 		p.text, p.muted = ui.Hex("#f4f6ff"), ui.RGBA(226, 232, 255, 0.64)
 		p.accent, p.accentText = ui.Hex("#b4bcdf"), ui.Hex("#0f1430")
 	} else {
-		p.bg, p.backdrop = ui.Hex("#eef1fb"), [2]ui.Color{ui.Hex("#dfe6ff"), ui.Hex("#fbe7f3")}
-		p.glows = [4]glow{{ui.Hex("#818cf8"), 0.75}, {ui.Hex("#22d3ee"), 0.55}, {ui.Hex("#c084fc"), 0.6}, {ui.Hex("#f472b6"), 0.45}}
+		p.bg, p.backdrop = ui.Hex("#eceef2"), [2]ui.Color{ui.Hex("#eceef2"), ui.Hex("#e6e9ee")}
+		p.glows = [4]glow{{ui.Hex("#ffffff"), 0.9}, {ui.Hex("#f7f8fa"), 0.7}, {ui.Hex("#d5dae3"), 0.8}, {ui.Hex("#ffffff"), 0.6}}
 		ink := ui.RGB(15, 20, 48)
 		white := ui.Hex("#ffffff")
 		p.fill, p.fillHover, p.fillOn = white.Alpha(0.5), white.Alpha(0.72), white.Alpha(0.9)

@@ -201,7 +201,7 @@ func (a *App) UpdateSubscription(id string) {
 	job := &subscriptionJob{cancel: cancel}
 	a.subJobs[id] = job
 	target, client := g.URL, a.httpClient(30*time.Second)
-	go func() {
+	a.jobs.Go(func() {
 		defer cancel()
 		defer client.CloseIdleConnections()
 		nodes, errs, err := fetchSubscription(ctx, client, target)
@@ -227,7 +227,7 @@ func (a *App) UpdateSubscription(id string) {
 			a.Save()
 			a.SyncCores()
 		})
-	}()
+	})
 }
 
 // replaceGroupNodes swaps a subscription's nodes, keeping the IDs of unchanged servers so selection,

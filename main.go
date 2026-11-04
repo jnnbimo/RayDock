@@ -56,7 +56,10 @@ func parseArgs(args []string) launchArgs {
 	return l
 }
 
-const prepareUninstallArg = "--prepare-uninstall"
+const (
+	prepareUninstallArg = "--prepare-uninstall"
+	uninstallErrorFile  = "uninstall-error.txt" // in the data directory
+)
 
 // prepareUninstall acquires the application lock only after the running instance completed Shutdown.
 // Errors propagate to NSIS before it deletes any installation files or registration metadata.
@@ -93,13 +96,16 @@ func main() {
 	// MyGo keeps its own files (window-state.json) there too.
 	mygo.App.SetPath(mygo.PathUserData, dataDir)
 	if slices.Contains(os.Args[1:], prepareUninstallArg) {
+		// Why it failed is kept for the uninstaller's message to point to (installer.nsh), until it succeeds.
+		report := filepath.Join(dataDir, uninstallErrorFile)
 		if err := prepareUninstall(dataDir); err != nil {
 			log.Print(err)
 			if os.MkdirAll(dataDir, 0o700) == nil {
-				_ = os.WriteFile(filepath.Join(dataDir, "uninstall-error.txt"), []byte(err.Error()+"\n"), 0o600)
+				_ = os.WriteFile(report, []byte(err.Error()+"\n"), 0o600)
 			}
 			os.Exit(1)
 		}
+		_ = os.Remove(report)
 		return
 	}
 	// Relaunched through UAC only to change the logon task: no window, no single-instance lock.
@@ -271,7 +277,7 @@ func main() {
 			// destroyed to release Direct3D; software views are retained above.
 			mygo.App.OnWindowAllClosed(func() {})
 		}
-		go flushLogsLoop(a, post)
+		a.StartLogs()
 		a.StartTraffic()
 
 		// Prepare the core first; a connect started before it is ready waits for it.
@@ -349,15 +355,4 @@ func applyAppearance(v int) {
 		v = 0
 	}
 	mygo.Theme.SetSource(sources[v])
-}
-
-// flushLogsLoop batches core output to avoid repainting for every log line.
-func flushLogsLoop(a *app.App, post func(func())) {
-	t := time.NewTicker(200 * time.Millisecond)
-	defer t.Stop()
-	for range t.C {
-		if a.LogsPending() {
-			post(func() { a.FlushLogs() })
-		}
-	}
 }

@@ -145,7 +145,7 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 		a.QueueLog("[RayDock] 应用变更" + cut)
 	}
 	if opts.TUN.Enabled {
-		go a.watchLocalNet(ctx)
+		a.jobs.Go(func() { a.watchLocalNet(ctx) })
 	}
 	a.startCore(t, func(err error) { a.started(t, err) })
 }

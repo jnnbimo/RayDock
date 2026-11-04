@@ -88,7 +88,7 @@ type App struct {
 	runningPort int // committed local port, distinct from edited settings
 	workCtx     context.Context
 	workCancel  context.CancelFunc
-	jobs        sync.WaitGroup // core/rule-data replacement jobs
+	jobs        sync.WaitGroup // work in the background, which ends with workCtx: Shutdown waits for it
 	closing     bool
 
 	Conn     ConnState

@@ -182,7 +182,7 @@ func (a *App) TestReal() {
 	a.realTests++
 	a.RealTest = Latency{Testing: true}
 	test, port, ctx := a.realTests, target.opts.Port, a.connCtx
-	go func() {
+	a.jobs.Go(func() {
 		d, err := probe.ViaProxy(ctx, port, probe.TestURL, 10*time.Second)
 		a.Post(func() {
 			if test != a.realTests {
@@ -197,7 +197,7 @@ func (a *App) TestReal() {
 				a.RealTest.Err = shortErr(err)
 			}
 		})
-	}()
+	})
 }
 
 func (a *App) firstNormalGroup() string {
