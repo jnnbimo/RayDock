@@ -10,8 +10,8 @@ RayDock. Copyright and license terms remain with their respective owners.
 Bundled runtime components
 --------------------------
 
-Xray-core 26.10.29 (unmodified upstream executable): MPL-2.0
-Source: https://github.com/XTLS/Xray-core/tree/v26.10.29
+Xray-core 26.11.9 (unmodified upstream executable): MPL-2.0
+Source: https://github.com/XTLS/Xray-core/tree/v26.11.9
 The original license also accompanies core/xray.exe as core/LICENSE.
 
 Wintun (upstream prebuilt binary): Wintun Prebuilt Binaries License

@@ -136,7 +136,7 @@ func raisedEdge(dark bool, border ui.Color) ui.Color {
 // colorless replaces a built-in widget's accent selection with neutral glass.
 func (a *View) colorless(accent ui.Color) *ui.Theme {
 	t := a.theme
-	t.Accent, t.AccentText = accent, a.pal.text
+	t.Accent, t.InactiveAccent, t.AccentText = accent, accent, a.pal.text
 	return &t
 }
 

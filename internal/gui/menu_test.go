@@ -48,7 +48,7 @@ func TestTextMenus(t *testing.T) {
 
 	rightClickMenu(t, tt, "2026/10/18 [Info] proxy: accepted", "复制全部")
 	clickFrame(t, tt, "复制全部")
-	if !strings.Contains(h.Clip.Text, "Xray started") || !strings.Contains(h.Clip.Text, "proxy: accepted") || v.menu.open {
+	if !strings.Contains(h.Clip.Text, "Xray started") || !strings.Contains(h.Clip.Text, "proxy: accepted") || v.menu.id != "" {
 		t.Fatalf("clipboard %q menu %+v", h.Clip.Text, v.menu)
 	}
 
@@ -109,12 +109,12 @@ func TestNoSystemMenus(t *testing.T) {
 		}
 		tt.Frame()
 		tt.Frame()
-		if m := tt.Menu(); len(m) > 0 || !v.menu.open {
+		if m := tt.Menu(); len(m) > 0 || v.menu.id == "" {
 			t.Fatalf("%q: system menu %q, own menu %+v", text, m, v.menu)
 		}
 		tt.Key(0, ui.KeyEscape)
 		tt.Frame()
-		if v.menu.open {
+		if v.menu.id != "" {
 			t.Fatalf("%q: Escape left the menu open", text)
 		}
 	}

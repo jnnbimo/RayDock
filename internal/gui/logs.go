@@ -46,16 +46,14 @@ func (a *View) logsPage(c *ui.Context) {
 
 // logMenu is the menu of the log list: copy the selection or every line, or clear the log.
 func (a *View) logMenu(c *ui.Context, list ui.Element) {
-	a.takeRightClick(list, "logs")
-	if !a.menuFor("logs") {
-		return
-	}
-	selected := selectedText(list)
-	a.drawMenu(c, []menuItem{
-		{label: "复制", disabled: selected == "", act: func() { a.Clipboard.WriteText(selected) }},
-		{label: "复制全部", disabled: len(a.Logs) == 0, act: func() { a.copyLogs(c) }},
-		{},
-		{label: "清空日志", danger: true, disabled: len(a.Logs) == 0, act: func() { a.Logs = nil }},
+	a.contextMenu(c, list, "logs", nil, func() []menuItem {
+		selected := selectedText(list)
+		return []menuItem{
+			{label: "复制", disabled: selected == "", act: func() { a.Clipboard.WriteText(selected) }},
+			{label: "复制全部", disabled: len(a.Logs) == 0, act: func() { a.copyLogs(c) }},
+			{},
+			{label: "清空日志", danger: true, disabled: len(a.Logs) == 0, act: func() { a.Logs = nil }},
+		}
 	})
 }
 

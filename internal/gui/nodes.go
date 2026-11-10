@@ -190,27 +190,19 @@ func (a *View) nodeList(c *ui.Context, rows []int) {
 		if list.Submitted() && a.selRow >= 0 && a.selRow < len(rows) {
 			a.connect(c, a.State.Nodes[rows[a.selRow]].ID)
 		}
-		// The menu key and Shift+F10 open the selected row's menu below its start.
+		// The menu key and Shift+F10 open the selected row's menu below it: the list, not the row, has the
+		// keyboard, which MyGo opens the menu of.
 		if (a.nodeLS.Shortcut(c, 0, ui.KeyContextMenu) || a.nodeLS.Shortcut(c, ui.Shift, ui.KeyF10)) && a.selRow >= 0 && a.selRow < len(rows) {
-			a.openMenuAt(nodeMenuID(a.State.Nodes[rows[a.selRow]].ID), a.menuX, a.menuY, true)
+			a.menu = ctxMenu{id: nodeMenuID(a.State.Nodes[rows[a.selRow]].ID)}
+			c.AnimationFrame() // the row, built before, shows it in the next
 		}
 	})
-	a.nodeMenu(c)
 }
 
 func nodeMenuID(id string) string { return "node:" + id }
 
-// nodeMenu draws the open menu of a node row. It is built after the rows, so its actions may remove one.
-func (a *View) nodeMenu(c *ui.Context) {
-	nodeID, ok := strings.CutPrefix(a.menu.id, "node:")
-	if !a.menu.open || !ok {
-		return
-	}
-	n := a.NodeByID(nodeID)
-	if n == nil {
-		a.menu = ctxMenu{}
-		return
-	}
+// nodeItems are the items of a node row's menu.
+func (a *View) nodeItems(c *ui.Context, n *node.Node) []menuItem {
 	id, link := n.ID, n.Link
 	speed := menuItem{label: "测速", act: func() {
 		if err := a.TestSpeed([]string{id}); err != nil {
@@ -220,7 +212,7 @@ func (a *View) nodeMenu(c *ui.Context) {
 	if a.SpeedBusy {
 		speed = menuItem{label: "停止测速", act: a.StopSpeedTest}
 	}
-	a.drawMenu(c, []menuItem{
+	return []menuItem{
 		{label: "连接", act: func() { a.connect(c, id) }},
 		{label: "编辑", act: func() { a.openEditNode(id) }},
 		speed,
@@ -233,7 +225,7 @@ func (a *View) nodeMenu(c *ui.Context) {
 		{label: "设置专用端口", act: func() { a.openPortDialog(id) }},
 		{},
 		{label: "删除", danger: true, act: func() { a.confirmDeleteNode(id) }},
-	})
+	}
 }
 
 func (a *View) nodeRow(c *ui.Context, n *node.Node, selected bool, w colWidths) {
@@ -243,7 +235,7 @@ func (a *View) nodeRow(c *ui.Context, n *node.Node, selected bool, w colWidths) 
 	// The row's text starts paneInset in from the list's pane, as its header: the list's inset, the row's
 	// rim, then its padding.
 	row := choosable(ui.Row(c).Gap(colGap).Padding(8, paneInset-listInset-1).MinHeight(48).Radius(8).AlignItems(ui.Center))
-	a.takeRightClick(row, nodeMenuID(id))
+	a.contextMenu(c, row, nodeMenuID(id), nil, func() []menuItem { return a.nodeItems(c, n) })
 	// The node in use is washed green, amber while connecting; chosen or hovered, the wash deepens.
 	wash := p.success
 	if a.Conn == app.StateConnecting {
@@ -261,9 +253,6 @@ func (a *View) nodeRow(c *ui.Context, n *node.Node, selected bool, w colWidths) 
 		row.Background(wash.Alpha(0.22))
 	case hovered:
 		row.Background(a.theme.SurfaceHover)
-	}
-	if selected {
-		a.menuX, a.menuY = row.LocalToWindow(16, row.LayoutBounds().H)
 	}
 	sub := p.muted
 	row.Children(func() {
@@ -434,8 +423,7 @@ func (a *View) portDialog(c *ui.Context) {
 		ui.Text(c, "程序连接这个本地端口（SOCKS5 与 HTTP 共用）时，始终经「"+n.Label()+"」及其分组的代理链上网，与当前连接的节点无关。").
 			FontSize(12.5).TextColor(p.muted).LineHeight(1.5)
 		a.labeled(c, "端口", func() {
-			port := ui.NumberInput(c.Key("node-port"), &a.portValue, 1024, 65535, 1).Label("专用端口").AutoFocus()
-			submitted = a.numberMenu(c, port, "node-port", &a.portValue, 1024, 65535, nil).Submitted()
+			submitted = a.numberInput(c, "node-port", "专用端口", &a.portValue, 1024, 65535, 1, nil).AutoFocus().Submitted()
 		})
 		if a.State.Settings.AllowLAN {
 			ui.Text(c, "已允许局域网连接：其它设备也可以通过本机地址使用这个端口。").FontSize(12).TextColor(p.warning)

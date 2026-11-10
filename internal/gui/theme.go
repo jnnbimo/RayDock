@@ -64,7 +64,8 @@ func (p palette) theme(base ui.Theme) ui.Theme {
 	t.Surface, t.SurfaceHover, t.SurfacePressed = p.fill, p.fillHover, p.fillOn
 	t.Border = p.border
 	t.Text, t.TextMuted = p.text, p.muted
-	t.Accent = p.accent
+	// The accent stays while the window does not have the input, as Windows apps keep theirs (MyGo fades it).
+	t.Accent, t.InactiveAccent = p.accent, p.accent
 	t.AccentHover = p.accent.Mix(ui.Hex("#ffffff"), 0.12)
 	t.AccentPressed = p.accent.Mix(ui.Hex("#000000"), 0.15)
 	t.AccentText = p.accentText

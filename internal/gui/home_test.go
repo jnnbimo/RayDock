@@ -92,9 +92,8 @@ func TestRateChartStaysInPlot(t *testing.T) {
 
 type fakeWindow struct{ minimized, closed int }
 
-func (w *fakeWindow) Minimize()       { w.minimized++ }
-func (w *fakeWindow) Close()          { w.closed++ }
-func (w *fakeWindow) IsFocused() bool { return true }
+func (w *fakeWindow) Minimize() { w.minimized++ }
+func (w *fakeWindow) Close()    { w.closed++ }
 
 // The window has a fixed size: its title bar has minimize and close, and no maximize.
 func TestWindowButtons(t *testing.T) {
@@ -120,6 +119,28 @@ func TestWindowButtons(t *testing.T) {
 	if w.minimized != 1 || w.closed != 1 {
 		t.Errorf("minimized %d times, closed %d times", w.minimized, w.closed)
 	}
+	// Their glyphs are fainter while the window does not have the input, as Windows' are.
+	tt.Move(0, MainHeight-1)
+	tt.Frame()
+	r, _ := tt.Find("\ue921")
+	ink := func() (sum int) {
+		img := tt.Image()
+		for y := int(r.Y); y < int(r.Y+r.H); y++ {
+			for x := int(r.X); x < int(r.X+r.W); x++ {
+				px := img.RGBAAt(x, y)
+				sum += int(px.R) + int(px.G) + int(px.B)
+			}
+		}
+		return sum
+	}
+	active := ink()
+	tt.SetWindowActive(false)
+	tt.Frame()
+	if inactive := ink(); inactive == active {
+		t.Error("the window buttons look the same in an inactive window")
+	}
+	tt.SetWindowActive(true)
+	tt.Frame()
 	// They take the pointer, not the keyboard focus: Tab goes around the page without them.
 	for range 30 {
 		tt.Key(0, ui.KeyTab)
@@ -130,8 +151,8 @@ func TestWindowButtons(t *testing.T) {
 	}
 }
 
-// A display too short for the window leaves it shorter (main.go's fitWindow): the page keeps its layout and
-// scrolls, so its bottom, the connection panel's last line, can be reached.
+// A work area too short for the page even at minZoom leaves the window shorter (main.go's fitWindow): the
+// page keeps its layout and scrolls, so its bottom, the connection panel's last line, can be reached.
 func TestShortWindowScrolls(t *testing.T) {
 	h := apptest.New(t)
 	const height = MainHeight - 140

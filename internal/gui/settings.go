@@ -143,9 +143,7 @@ func (a *View) tunSection(c *ui.Context) {
 				t.MTU = int(mtu)
 				a.SettingChanged()
 			}
-			if a.numberMenu(c, ui.NumberInput(c.Key("tun-mtu"), &mtu, 1280, 9000, 10).Label("MTU"), "tun-mtu", &mtu, 1280, 9000, apply).Changed() {
-				apply()
-			}
+			a.numberInput(c, "tun-mtu", "MTU", &mtu, 1280, 9000, 10, apply)
 		})
 	})
 }
@@ -159,9 +157,7 @@ func (a *View) proxySection(c *ui.Context) {
 				s.Port = int(port)
 				a.SettingChanged()
 			}
-			if a.numberMenu(c, ui.NumberInput(c.Key("port"), &port, 1024, 65535, 1).Label("本地代理端口"), "port", &port, 1024, 65535, apply).Changed() {
-				apply()
-			}
+			a.numberInput(c, "port", "本地代理端口", &port, 1024, 65535, 1, apply)
 		})
 		ports := "未分配"
 		if k := len(a.PortNodes()); k > 0 {
@@ -205,7 +201,6 @@ func (a *View) generalSection(c *ui.Context) {
 				a.SettingChanged()
 			})
 		})
-		f.row(c, "关闭窗口", "最小化到托盘继续运行", nil)
 	})
 }
 

@@ -31,9 +31,9 @@ const (
 	gapBlock      = 16
 	controlHeight = 34
 	paneInset     = 16
-	// MainWidth and MainHeight are the size of the main window's page, which the window keeps: at this
-	// height the home page's traffic card, under its cards of topCardsHeight, starts and ends with the
-	// sidebar's connection panel.
+	// MainWidth and MainHeight are the size of the main window's page, which the window keeps at its zoom
+	// (Zoom): at this height the home page's traffic card, under its cards of topCardsHeight, starts and
+	// ends with the sidebar's connection panel.
 	MainWidth, MainHeight = 980, 640
 	// titleBarHeight is the height of the window's buttons (windowButtons), as Windows 11's title bars.
 	titleBarHeight = 32
@@ -59,10 +59,9 @@ type View struct {
 	selRow      int
 	nf          nodeForm
 	menu        ctxMenu
+	menuAct     func()     // the item chosen from the menu, which runs once the window is built
 	editSel     pendingSel // a selection a text input takes after its menu edited it
 	typeahead   typeahead  // what was typed into the open options of a choice
-	menuX       float32    // where the keyboard opens the selected row's menu, in the window
-	menuY       float32
 	portOpen    bool
 	portNode    string
 	portValue   float64
@@ -79,13 +78,13 @@ type View struct {
 	// options in (choice); zero outside a dialog, for the window.
 	popupArea ui.Rect
 	win       windowActions // nil until SetWindow
+	zoom      float32       // the page's zoom (Zoom); 0 for none
 }
 
 // windowActions is what the title bar's buttons do to the window: a *mygo.Window.
 type windowActions interface {
 	Minimize()
 	Close()
-	IsFocused() bool
 }
 
 // SetWindow gives the view the window it shows in, which its title bar's buttons minimize and close.
@@ -107,6 +106,7 @@ func (a *View) SoftwareRendering() bool { return a.software }
 
 // Build builds the window content.
 func (a *View) Build(c *ui.Context) {
+	c.SetZoom(cmp.Or(a.zoom, 1))
 	a.pal = newPalette(c.Theme().Dark)
 	a.theme = a.pal.theme(*c.Theme())
 	c.SetTheme(&a.theme)
@@ -115,8 +115,8 @@ func (a *View) Build(c *ui.Context) {
 	}
 
 	a.backdrop(c, func() {
-		// The page is laid out at its size, MainHeight, which the window has, and scrolls in a window a
-		// short screen leaves shorter (main.go).
+		// The page is laid out at its size, MainHeight, which the window has at its zoom (Zoom). It scrolls
+		// only where a work area is too short for it even at minZoom, which leaves the window shorter.
 		if _, h := c.Size(); h < MainHeight {
 			ui.Scroll(c.Key("window")).Fill().Children(func() { a.page(c).Height(MainHeight) })
 		} else {
@@ -130,6 +130,10 @@ func (a *View) Build(c *ui.Context) {
 	a.adminDialog(c)
 	a.confirmDialog(c)
 	a.toasts(c)
+	if act := a.menuAct; act != nil {
+		a.menuAct = nil
+		act()
+	}
 }
 
 // page is the window's content: the sidebar beside the title bar and the page shown.
@@ -283,7 +287,7 @@ func (a *View) windowButton(c *ui.Context, key, glyph, label string, close bool)
 		b.Background(base.Alpha(0.2))
 	case b.Hovered():
 		b.Background(base.Alpha(0.1))
-	case a.win != nil && !a.win.IsFocused():
+	case !c.WindowActive():
 		fore = base.Alpha(0x72 / 255.0)
 	}
 	return b.Children(func() {

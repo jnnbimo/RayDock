@@ -546,8 +546,8 @@ func TestSpeedFromMenu(t *testing.T) {
 	h.Wait(t, func() bool { return !a.SpeedBusy })
 }
 
-// Shift+F10 opens the selected row's menu with its first item focused; arrows and Enter choose, and the
-// edit dialog saves a change.
+// Shift+F10 opens the selected row's menu, which takes the keyboard with no item highlighted, as MyGo opens
+// a menu the view opens: Down goes to the first item, and on, Enter chooses, and the edit dialog saves a change.
 func TestRowMenuKeyboardEdit(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
@@ -561,15 +561,17 @@ func TestRowMenuKeyboardEdit(t *testing.T) {
 	tt.Key(ui.Shift, ui.KeyF10)
 	tt.Frame()
 	tt.Frame()
-	if !v.menu.open || !tt.Focused("连接") {
+	if v.menu.id == "" || !tt.Focused("连接") {
 		t.Fatalf("menu %+v texts %q", v.menu, tt.Texts())
 	}
-	tt.Key(0, ui.KeyDown)
-	tt.Frame()
+	for range 2 { // to 连接, then 编辑
+		tt.Key(0, ui.KeyDown)
+		tt.Frame()
+	}
 	tt.Key(0, ui.KeyEnter)
 	tt.Frame()
 	tt.Frame()
-	if v.menu.open || !v.nf.open || v.nf.id != a.State.Nodes[0].ID || !tt.HasText("编辑节点") {
+	if v.menu.id != "" || !v.nf.open || v.nf.id != a.State.Nodes[0].ID || !tt.HasText("编辑节点") {
 		t.Fatalf("menu %+v form %+v", v.menu, v.nf)
 	}
 	v.nf.n.Password = "new-secret"

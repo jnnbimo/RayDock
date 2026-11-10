@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -134,16 +135,25 @@ func main() {
 		fatal(err) // never create a writable app after a failed read or backup
 	}
 
-	// win is the latest main window. Software-rendered windows stay hidden in
+	// win is the latest main window, and winView its view. Software-rendered windows stay hidden in
 	// the tray; hardware-rendered ones are destroyed to release the renderer.
 	var (
-		win   *mygo.Window
-		winMu sync.Mutex
+		win     *mygo.Window
+		winView *gui.View
+		winMu   sync.Mutex
 	)
 	current := func() *mygo.Window {
 		winMu.Lock()
 		defer winMu.Unlock()
 		return win
+	}
+	fitCurrent := func(place bool) {
+		winMu.Lock()
+		w, view := win, winView
+		winMu.Unlock()
+		if view != nil && !w.IsDestroyed() {
+			fitWindow(w, view, place)
+		}
 	}
 	// post runs fn on the UI thread. A destroyed window still runs it there and only skips the redraw, so
 	// the app keeps its state current while it sits in the tray without a window.
@@ -208,17 +218,20 @@ func main() {
 				Hidden:            true,
 				Content:           ui.View(view.Build),
 			})
-			// The saved state keeps the window where it was; a size or maximized state saved while it could
-			// be resized goes.
+			// The saved state keeps the window where it was; a maximized state saved while it could be
+			// resized goes. Its size is the page's, zoomed to its display.
 			w.Unmaximize()
-			w.SetContentSize(gui.MainWidth, gui.MainHeight)
-			fitWindow(w, true)
-			w.OnMove(func() { fitWindow(w, false) }) // to another display
+			fitWindow(w, view, true)
+			w.OnMove(func() { fitWindow(w, view, false) }) // to another display
 			view.SetWindow(w)
-			// The window's buttons are fainter while it is inactive.
-			redraw := func() { w.Update(func() {}) }
-			w.OnFocus(redraw)
-			w.OnBlur(redraw)
+			// A destroyed window's view goes with it: it holds the window's caches.
+			w.OnClosed(func() {
+				winMu.Lock()
+				if win == w {
+					winView = nil
+				}
+				winMu.Unlock()
+			})
 			w.OnClose(func(e *mygo.CloseEvent) {
 				// Retain the text engine and ambient image on devices without a GPU.
 				// Hidden windows draw nothing; MyGo releases idle frame buffers.
@@ -229,7 +242,7 @@ func main() {
 			})
 			_ = w.SetIcon(brand.PNG(256, brand.Active)) // dev builds have no icon resource
 			winMu.Lock()
-			win = w
+			win, winView = w, view
 			winMu.Unlock()
 			if !hidden {
 				// Shown at once, a new window shows its empty frame, then a white one, then its picture: it
@@ -241,17 +254,14 @@ func main() {
 			return w
 		}
 		open(args.autostart)
-		mygo.Screen.OnDisplaysChanged(func() {
-			if w := current(); !w.IsDestroyed() {
-				fitWindow(w, true)
-			}
-		})
+		mygo.Screen.OnDisplaysChanged(func() { fitCurrent(true) }) // resolution, scale or work area
 		show := func() {
 			w := current()
 			if w.IsDestroyed() {
-				w = open(false)
+				w = open(false) // fitted as it opens
+			} else {
+				fitCurrent(true)
 			}
-			fitWindow(w, true)
 			w.Show()
 			if w.IsMinimized() {
 				w.Restore()
@@ -324,20 +334,28 @@ func loadState(path string) (store.State, error) {
 	return st, nil
 }
 
-// fitWindow gives the window the page's size, or what the work area of its display leaves when that is
-// smaller (the page then scrolls), and with place moves it into the work area. Its size is the user's
-// to change no more than the page's: a display too short for it would hide the bottom of the page.
-func fitWindow(w *mygo.Window, place bool) {
+// fitWindow zooms the page of view to the display the window is on (gui.Zoom), so that it looks as on a
+// 1080p display at 100%, and gives the window its zoomed size, or what the work area leaves when it is
+// smaller still (the page then scrolls); with place it moves the window into the work area. The user does
+// not resize it: the page has one layout.
+func fitWindow(w *mygo.Window, view *gui.View, place bool) {
 	b, cb := w.Bounds(), w.ContentBounds()
-	wa := mygo.Screen.DisplayMatching(b).WorkArea
+	d := mygo.Screen.DisplayMatching(b)
+	wa := d.WorkArea
 	if wa.Width <= 0 || wa.Height <= 0 {
 		return
 	}
 	frameW, frameH := b.Width-cb.Width, b.Height-cb.Height
-	width, height := min(gui.MainWidth, wa.Width-frameW), min(gui.MainHeight, wa.Height-frameH)
+	roomW, roomH := wa.Width-frameW, wa.Height-frameH
+	z := gui.Zoom(d.Bounds.Width, d.Bounds.Height, roomW, roomH)
+	zoomed := view.SetZoom(z)
+	width := min(int(math.Ceil(float64(gui.MainWidth*z))), roomW)
+	height := min(int(math.Ceil(float64(gui.MainHeight*z))), roomH)
 	if width != cb.Width || height != cb.Height {
 		w.SetContentSize(width, height)
 		b = w.Bounds()
+	} else if zoomed {
+		w.Update(func() {}) // the page, at its new zoom
 	}
 	if !place {
 		return

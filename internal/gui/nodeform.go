@@ -391,7 +391,7 @@ func (a *View) text(c *ui.Context, key, label string, value *string, placeholder
 func (a *View) number(c *ui.Context, key, label string, value *float64, lo, hi float64) func() {
 	return func() {
 		ui.Text(c, label).FontSize(12.5).TextColor(a.pal.muted).SingleLine()
-		a.numberMenu(c, ui.NumberInput(c.Key(key), value, lo, hi, 1).Label(label), key, value, lo, hi, nil)
+		a.numberInput(c, key, label, value, lo, hi, 1, nil)
 	}
 }
 
