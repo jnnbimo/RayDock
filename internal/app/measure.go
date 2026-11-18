@@ -191,7 +191,9 @@ func (a *App) measureLatency(ctx context.Context, exe, strategy string, jobs []l
 			n := j.chain[0]
 			l = tcpLatency(ctx, dialer, resolver, family, n.Host, n.Port)
 		}
-		if l.Err == "" && routed {
+		if l.Err == "" && !routed {
+			l.IPErr = "出口检测未启动，详见日志"
+		} else if l.Err == "" {
 			if ip, err := probe.ExitIP(ctx, port, 8*time.Second); err == nil {
 				l.IP = ip.String()
 			} else {
@@ -257,10 +259,75 @@ func (a *App) startLatencyCore(ctx context.Context, exe, cfgPath, strategy strin
 	if err == nil {
 		err = a.latencyCore.Start(ctx, exe, cfgPath, cfg, nil)
 	}
+	if err == nil {
+		return ports, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	usable, isolateErr := isolateProbeRoutes(checkCtx, exe, routes, local, func(p int, why error) {
+		a.QueueLog(fmt.Sprintf("[RayDock] 跳过延迟检测端口 %d：%v", p, why))
+	})
+	if isolateErr != nil {
+		return nil, errors.Join(err, isolateErr)
+	}
+	if len(usable) == len(routes) {
+		return nil, err
+	} // no per-route failure
+	if len(usable) == 0 {
+		return nil, err
+	}
+	cfg, retryErr := xray.BuildProbe(usable, local)
+	if retryErr == nil {
+		retryErr = a.latencyCore.Start(ctx, exe, cfgPath, cfg, nil)
+	}
+	if retryErr != nil {
+		return nil, errors.Join(err, retryErr)
+	}
+	good := make(map[int]bool, len(usable))
+	for _, r := range usable {
+		good[r.Port] = true
+	}
+	for id, p := range ports {
+		if !good[p] {
+			delete(ports, id)
+		}
+	}
+	return ports, nil
+}
+
+// Subdivide only configurations rejected by Xray. Launch/I/O failures are not blamed on a node.
+func isolateProbeRoutes(ctx context.Context, exe string, routes []xray.PortRoute, local *xray.Local, report func(int, error)) ([]xray.PortRoute, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cfg, err := xray.BuildProbe(routes, local)
 	if err != nil {
 		return nil, err
 	}
-	return ports, nil
+	err = xray.ValidateConfig(ctx, exe, cfg)
+	if err == nil {
+		return routes, nil
+	}
+	var rejected *xray.ConfigError
+	if !errors.As(err, &rejected) {
+		return nil, err
+	}
+	if len(routes) == 1 {
+		report(routes[0].Port, err)
+		return nil, nil
+	}
+	left, err := isolateProbeRoutes(ctx, exe, routes[:len(routes)/2], local, report)
+	if err != nil {
+		return nil, err
+	}
+	right, err := isolateProbeRoutes(ctx, exe, routes[len(routes)/2:], local, report)
+	if err != nil {
+		return nil, err
+	}
+	return slices.Concat(left, right), nil
 }
 
 // tcpLatency times opening a TCP connection to host:port through the local network.
@@ -343,7 +410,11 @@ func localResolver(ctx context.Context, exe, cfgPath string, core *xray.Core, if
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := xray.BuildResolver(port, localXray(iface, strategy))
+	local := localXray(iface, strategy)
+	if len(iface.DNS) > 0 && len(local.DNS) == 0 {
+		return nil, errors.New("物理网络仅提供带区域的 IPv6 DNS，当前 Xray 不支持")
+	}
+	cfg, err := xray.BuildResolver(port, local)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +428,9 @@ func localResolver(ctx context.Context, exe, cfgPath string, core *xray.Core, if
 func localXray(iface *localnet.Interface, strategy string) xray.Local {
 	l := xray.Local{Interface: iface.Name, Strategy: strategy}
 	for _, s := range iface.DNS {
-		l.DNS = append(l.DNS, s.Addr().String())
+		if s.Addr().Zone() == "" {
+			l.DNS = append(l.DNS, s.Addr().String())
+		}
 	}
 	return l
 }

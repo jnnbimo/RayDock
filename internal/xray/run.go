@@ -228,7 +228,7 @@ func nodeOutbounds(chain []*node.Node, local *Local) ([]any, string, error) {
 		return nil, "", err
 	}
 	sum := sha256.Sum256(data)
-	prefix := fmt.Sprintf("%s%x-", nodePrefix, sum[:4])
+	prefix := fmt.Sprintf("%s%x-", nodePrefix, sum[:])
 	outs, err := chainOutbounds(chain, prefix)
 	if err != nil {
 		return nil, "", err

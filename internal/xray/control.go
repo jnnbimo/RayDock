@@ -133,6 +133,36 @@ func typed(name string, b []byte) []byte {
 	return append(wireBytes(1, []byte(name)), wireBytes(2, b)...)
 }
 
+const handlerAPI = "/xray.app.proxyman.command.HandlerService/"
+
+// inboundTags lists committed handlers. Xray removes the tag again if Start fails.
+func inboundTags(ctx context.Context, client *http.Client, port int) (map[string]bool, error) {
+	data, err := rpc(ctx, client, port, handlerAPI+"ListInbounds", wireInt(1, 1))
+	if err != nil {
+		return nil, err
+	}
+	tags := map[string]bool{}
+	for len(data) > 0 {
+		f, err := protoField(&data)
+		if err != nil {
+			return nil, err
+		}
+		if f.num != 1 {
+			continue
+		}
+		for in := f.bytes; len(in) > 0; {
+			v, err := protoField(&in)
+			if err != nil {
+				return nil, err
+			}
+			if v.num == 1 && v.bytes != nil {
+				tags[string(v.bytes)] = true
+			}
+		}
+	}
+	return tags, nil
+}
+
 // ActivateListeners creates the public, exclusively-owned mixed listeners after the old core released
 // them. It only adds RayDock's fixed SOCKS/HTTP inbounds; it never replaces outbounds or routing.
 func ActivateListeners(ctx context.Context, client *http.Client, port int, config []byte) error {
@@ -146,8 +176,12 @@ func ActivateListeners(ctx context.Context, client *http.Client, port int, confi
 	if err := json.Unmarshal(config, &cfg); err != nil {
 		return err
 	}
+	tags, err := inboundTags(ctx, client, port)
+	if err != nil {
+		return fmt.Errorf("读取核心监听端口失败：%w", err)
+	}
 	for _, in := range cfg.Inbounds {
-		if in.Protocol != "socks" {
+		if in.Protocol != "socks" || tags[in.Tag] {
 			continue
 		}
 		address := net.ParseIP(in.Listen).To4()
@@ -193,8 +227,11 @@ func ActivateListeners(ctx context.Context, client *http.Client, port int, confi
 		inbound := wireBytes(1, []byte(in.Tag))
 		inbound = append(inbound, wireBytes(2, typed("xray.app.proxyman.ReceiverConfig", receiver))...)
 		inbound = append(inbound, wireBytes(3, typed("xray.proxy.socks.ServerConfig", wireInt(4, 1)))...)
-		if _, err := rpc(ctx, client, port, "/xray.app.proxyman.command.HandlerService/AddInbound", wireBytes(1, inbound)); err != nil {
-			return fmt.Errorf("启用端口 %s 失败：%w", strconv.Itoa(in.Port), err)
+		if _, err := rpc(ctx, client, port, handlerAPI+"AddInbound", wireBytes(1, inbound)); err != nil {
+			// A prior cancelled RPC may have committed, or this response may have been lost.
+			if known, listErr := inboundTags(ctx, client, port); listErr != nil || !known[in.Tag] {
+				return fmt.Errorf("启用端口 %s 失败：%w", strconv.Itoa(in.Port), err)
+			}
 		}
 	}
 	return nil

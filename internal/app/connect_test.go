@@ -354,7 +354,10 @@ func TestProxyPortMoveRecovers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			p.cur = sysproxy.Settings{Enabled: true, Server: c.system}
+			p.cur = sysproxy.Settings{Enabled: true, Server: c.system, Override: sysproxy.Bypass}
+			if c.name == "another program" {
+				p.cur = c.want
+			}
 			next, _, _ := newTestApp(t)
 			next.State, next.Proxy = saved, p
 			next.CleanStaleProxy()

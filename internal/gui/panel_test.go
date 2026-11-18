@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -18,7 +17,6 @@ func TestPowerKeyboardActivation(t *testing.T) {
 			t.Cleanup(a.Shutdown)
 			a.ImportLinks(apptest.LinkA, "")
 			a.State.SelectedID = a.State.Nodes[0].ID
-			h.Core.Err = errors.New("test offline")
 			tt := ui.NewTester(nodesView(a).Build, 1180, 760)
 			reached := false
 			for range 20 {
@@ -37,10 +35,10 @@ func TestPowerKeyboardActivation(t *testing.T) {
 			if a.Conn != app.StateConnecting {
 				t.Fatalf("keyboard did not activate power: conn=%v", a.Conn)
 			}
-			h.Wait(t, func() bool { return !a.CoreBusy })
+			h.Wait(t, func() bool { return !a.CoreBusy && a.Conn == app.StateOff })
 			tt.Frame()
-			if a.Conn != app.StateOff || a.ConnErr == "" {
-				t.Fatal("keyboard connection did not report the download error")
+			if a.ConnErr == "" {
+				t.Fatal("keyboard connection did not report the core failing to start")
 			}
 		})
 	}

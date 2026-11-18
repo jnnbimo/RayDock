@@ -47,39 +47,21 @@ func (a *View) settingsPage(c *ui.Context) {
 
 func (a *View) coreSection(c *ui.Context) {
 	p := a.pal
-	a.section(c, "Xray 核心", "负责代理连接的 Xray-core，不会自动更新", func(f *form) {
+	a.section(c, "Xray 核心", "随 RayDock 附带的代理核心", func(f *form) {
 		f.row(c, "版本", a.coreStatusText(), func() {
 			switch {
-			case a.CoreBusy || a.CoreChecking:
+			case a.CoreBusy:
 				ui.Spinner(c).Size(14, 14)
-			case a.CoreReady() && a.CoreVersion != "":
-				a.chip(c, "Xray "+a.CoreVersion, p.success)
+			case a.CoreReady() && a.CoreErr != "":
+				a.chip(c, "保留 Xray "+a.CoreVersion, p.warning)
+			case a.CoreErr != "":
+				a.chip(c, "不可用", p.danger)
 			case a.CoreReady():
-				a.chip(c, "已就绪", p.success)
+				a.chip(c, "Xray "+a.CoreVersion, p.success)
 			default:
 				a.chip(c, "未就绪", p.warning)
 			}
-			// Looking for a release installs nothing: an offered one is installed by a second click.
-			switch {
-			case a.CoreLatest != "" || !a.CoreReady():
-				label := "更新到 " + a.CoreLatest
-				if a.CoreLatest == "" {
-					label = "下载核心"
-				}
-				if iconButton(c, icDownload, label).Disabled(a.CoreBusy || a.GeoBusy).Clicked() {
-					a.UpdateCore()
-				}
-			default:
-				if iconButton(c, icRefresh, "检查更新").Disabled(a.CoreBusy || a.CoreChecking).Tooltip("查询最新正式版，不会自动安装").Clicked() {
-					a.CheckCoreUpdate()
-				}
-			}
 		})
-		if a.CoreBusy {
-			f.block(c, func() {
-				ui.Progress(c, a.CoreProgress).Label("下载进度")
-			})
-		}
 		f.row(c, "文件位置", a.CoreDir(), func() {
 			if iconButton(c, icFolder, "打开目录").Clicked() {
 				a.OpenPath(a.CoreDir())
@@ -94,23 +76,15 @@ func (a *View) coreStatusText() string {
 		return cmp.Or(a.CoreMsg, "正在准备…")
 	case a.CoreErr != "":
 		return a.CoreErr
-	case a.CoreLatest != "":
-		return "有新版本 " + a.CoreLatest
-	case a.CoreChecking:
-		return "正在检查更新…"
-	case a.CoreNote != "":
-		return a.CoreNote
-	case !a.CoreReady():
-		return "连接时会自动下载"
 	}
-	return "包含 xray 与 wintun.dll"
+	return ""
 }
 
 func (a *View) tunSection(c *ui.Context) {
 	p := a.pal
 	t := &a.State.Settings.TUN
-	a.section(c, "TUN 虚拟网卡", "通过虚拟网卡接管所有应用的流量，包括不读取系统代理的程序", func(f *form) {
-		f.row(c, "启用 TUN 模式", "需要管理员权限", func() {
+	a.section(c, "TUN 虚拟网卡", "通过虚拟网卡接管所有程序的流量", func(f *form) {
+		f.row(c, "启用 TUN 模式", "", func() {
 			switchControl(c.Key("tun"), &t.Enabled).Label("启用 TUN 模式").OnChange(func() { a.SetTUN(t.Enabled) })
 		})
 		f.row(c, "管理员权限", "创建虚拟网卡与修改路由需要", func() {
@@ -125,7 +99,7 @@ func (a *View) tunSection(c *ui.Context) {
 				}
 			}
 		})
-		f.row(c, "接管 IPv6", "同时把 IPv6 默认路由指向虚拟网卡", func() {
+		f.row(c, "接管 IPv6", "IPv6 流量也经过虚拟网卡", func() {
 			switchControl(c.Key("tun-v6"), &t.IPv6).Label("接管 IPv6").OnChange(a.SettingChanged)
 		})
 		f.row(c, "防止泄漏", "阻止绕过虚拟网卡的 DNS 查询，以及未接管的 IP 协议", func() {
@@ -150,7 +124,7 @@ func (a *View) tunSection(c *ui.Context) {
 
 func (a *View) proxySection(c *ui.Context) {
 	s := &a.State.Settings
-	a.section(c, "本地代理", "SOCKS5 与 HTTP 共用一个端口，系统代理指向这里", func(f *form) {
+	a.section(c, "本地代理", "SOCKS5 与 HTTP 共用一个端口", func(f *form) {
 		f.row(c, "端口", "默认 10818", func() {
 			port := float64(s.Port)
 			apply := func() {
@@ -166,7 +140,7 @@ func (a *View) proxySection(c *ui.Context) {
 		f.row(c, "节点专用端口", "连接专用端口的程序始终使用对应节点，在节点右键菜单中设置", func() {
 			ui.Text(c, ports).FontSize(12.5).TextColor(a.pal.muted)
 		})
-		f.row(c, "允许局域网连接", "同一网络的其它设备可以使用本地代理与专用端口", func() {
+		f.row(c, "允许局域网连接", "同一网络的其他设备可以使用本地代理与专用端口", func() {
 			switchControl(c.Key("lan"), &s.AllowLAN).Label("允许局域网连接").OnChange(a.SettingChanged)
 		})
 		if !sysproxy.Supported() {
@@ -195,7 +169,7 @@ func (a *View) generalSection(c *ui.Context) {
 				idx = i
 			}
 		}
-		f.row(c, "日志级别", "info 及以上会记录每条连接", func() {
+		f.row(c, "日志级别", "info 与 debug 会记录每条连接", func() {
 			segmented(c.Key("loglevel"), &idx, levels...).Label("日志级别").OnChange(func() {
 				s.LogLevel = levels[idx]
 				a.SettingChanged()
@@ -211,9 +185,9 @@ func (a *View) autostartRow(c *ui.Context, f *form) {
 		return
 	}
 	desc := []string{
-		"登录系统后不自动启动",
-		"登录后在托盘中启动，开启 TUN 时需要管理员授权",
-		"登录后以管理员身份在托盘中启动，开启 TUN 无需授权",
+		"登录后不自动启动",
+		"登录后自动启动",
+		"登录后以管理员身份启动，开启 TUN 无需确认",
 	}[a.StartMode]
 	f.row(c, "开机自启", desc, func() {
 		if a.StartBusy {
@@ -228,6 +202,11 @@ func (a *View) autostartRow(c *ui.Context, f *form) {
 			ui.Text(c, a.StartErr).FontSize(12).TextColor(p.danger)
 		})
 	}
+	s := &a.State.Settings
+	f.row(c, "自启时打开窗口", "关闭时只在托盘中运行", func() {
+		switchControl(c.Key("autostart-show"), &s.AutostartShow).Label("自启时打开窗口").
+			Disabled(a.StartMode == system.StartOff).OnChange(a.Save)
+	})
 }
 
 func (a *View) aboutSection(c *ui.Context) {
@@ -252,7 +231,7 @@ func (a *View) aboutSection(c *ui.Context) {
 			})
 			ui.Grid(c).ColumnTracks(ui.FitContent(), ui.Fr(1)).GapX(24).GapY(8).FontSize(12.5).Children(func() {
 				for _, kv := range [][2]string{
-					{"界面", "MyGo " + mygoVersion + "（自绘原生 UI）"},
+					{"界面", "MyGo " + mygoVersion},
 					{"Go", runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH},
 				} {
 					ui.Text(c, kv[0]).TextColor(p.muted)
@@ -260,10 +239,40 @@ func (a *View) aboutSection(c *ui.Context) {
 				}
 			})
 		})
+		if a.Version != "" {
+			a.updateRow(c, f)
+		}
 		f.row(c, "数据目录", a.DataDir, func() {
 			if iconButton(c, icFolder, "打开数据目录").Clicked() {
 				a.OpenPath(a.DataDir)
 			}
 		})
+	})
+}
+
+// updateRow offers a newer RayDock: it opens the download page, and installs nothing.
+func (a *View) updateRow(c *ui.Context, f *form) {
+	desc := "查询 GitHub 上的最新版本"
+	switch {
+	case a.UpdateChecking:
+		desc = "正在检查更新…"
+	case a.UpdateLatest != "":
+		desc = "有新版本 " + a.UpdateLatest
+	case a.UpdateNote != "":
+		desc = a.UpdateNote
+	}
+	f.row(c, "更新", desc, func() {
+		switch {
+		case a.UpdateChecking:
+			ui.Spinner(c).Size(14, 14)
+		case a.UpdateLatest != "": // stays offered: checking again would find the same
+			if iconButton(c, icDownload, "前往下载").Tooltip("在浏览器中打开 GitHub 发布页").Clicked() {
+				a.OpenReleases()
+			}
+			return
+		}
+		if iconButton(c, icRefresh, "检查更新").Disabled(a.UpdateChecking).Clicked() {
+			a.CheckUpdate()
+		}
 	})
 }

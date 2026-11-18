@@ -19,8 +19,8 @@ func TestProcessGuardShared(t *testing.T) {
 		return n
 	}
 	g := newProcessGuard()
-	if g == nil {
-		t.Skip("no job object")
+	if g.err != nil {
+		t.Fatal(g.err)
 	}
 	before := count()
 	for range 50 {

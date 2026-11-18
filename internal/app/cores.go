@@ -447,6 +447,9 @@ func (a *App) tunLocal(o xray.Options) (*xray.Local, error) {
 		return nil, err
 	}
 	l := localXray(iface, o.DNSStrategy)
+	if len(iface.DNS) > 0 && len(l.DNS) == 0 {
+		return nil, errors.New("物理网络仅提供带区域的 IPv6 DNS，当前 Xray 不支持")
+	}
 	return &l, nil
 }
 

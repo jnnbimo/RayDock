@@ -178,7 +178,7 @@ func (a *View) nodeList(c *ui.Context, rows []int) {
 			FontSize(headerSize).TextColor(p.muted).Children(func() {
 			a.sortHeader(c, "名称 / 地址", sortName, false).Grow(1).MinWidth(0)
 			ui.Text(c, "协议").Width(w.protocol).Shrink(0)
-			ui.Text(c, "专用端口").Width(w.port).Shrink(0).Tooltip("程序连接此端口时始终使用该节点，与当前连接无关")
+			ui.Text(c, "专用端口").Width(w.port).Shrink(0).Tooltip("程序经此端口上网时始终使用该节点")
 			a.sortHeader(c, "延迟", sortLatency, true).Width(w.latency)
 			ui.Text(c, "出口 IP").Width(w.ip).Shrink(0).Tooltip("经该节点访问网站时，网站看到的 IP")
 			ui.Text(c, "速度").Width(w.speed).Shrink(0).TextAlign(ui.End)
@@ -212,7 +212,7 @@ func (a *View) nodeItems(c *ui.Context, n *node.Node) []menuItem {
 	if a.SpeedBusy {
 		speed = menuItem{label: "停止测速", act: a.StopSpeedTest}
 	}
-	return []menuItem{
+	items := []menuItem{
 		{label: "连接", act: func() { a.connect(c, id) }},
 		{label: "编辑", act: func() { a.openEditNode(id) }},
 		speed,
@@ -223,9 +223,19 @@ func (a *View) nodeItems(c *ui.Context, n *node.Node) []menuItem {
 		}},
 		{label: "节点分享", disabled: link == "", act: func() { a.openShare(id) }},
 		{label: "设置专用端口", act: func() { a.openPortDialog(id) }},
-		{},
-		{label: "删除", danger: true, act: func() { a.confirmDeleteNode(id) }},
 	}
+	if n.AutoPin != "" && n.PinSHA256 == "" && n.VerifyName == "" {
+		items = append(items, menuItem{label: "重新固定证书", act: func() {
+			a.confirm("重新固定证书", "重新读取", func(c *ui.Context) {
+				if err := a.ResetAutoPin(id); err != nil {
+					c.Toast(err.Error())
+				} else {
+					c.Toast("正在重新读取服务器证书，结果见日志")
+				}
+			}, "清除自动固定的证书指纹，改为信任重新读取到的证书。请确认服务器已更换证书。")
+		}})
+	}
+	return append(items, menuItem{}, menuItem{label: "删除", danger: true, act: func() { a.confirmDeleteNode(id) }})
 }
 
 func (a *View) nodeRow(c *ui.Context, n *node.Node, selected bool, w colWidths) {
@@ -320,7 +330,7 @@ func (a *View) ipCell(c *ui.Context, id string, width float32, sub ui.Color) {
 				Tooltip("出口 IP：" + l.IP)
 		case l.IPErr != "":
 			ui.Text(c, l.IPErr).FontSize(12).TextColor(p.danger).
-				Tooltip("节点服务器可以连接，但经它访问查询 IP 的网站失败：节点配置可能有误，或它无法访问外网")
+				Tooltip("节点可以连接，但经它查询出口 IP 失败")
 		default:
 			ui.Text(c, "—").FontSize(12).TextColor(sub)
 		}
@@ -420,13 +430,13 @@ func (a *View) portDialog(c *ui.Context) {
 	var submitted bool
 	d := dialog{width: 480, title: "专用端口", err: &a.portErr}
 	d.body = func() {
-		ui.Text(c, "程序连接这个本地端口（SOCKS5 与 HTTP 共用）时，始终经「"+n.Label()+"」及其分组的代理链上网，与当前连接的节点无关。").
+		ui.Text(c, "程序经这个本地端口（SOCKS5 / HTTP）上网时，始终使用「"+n.Label()+"」及其分组的代理链。").
 			FontSize(12.5).TextColor(p.muted).LineHeight(1.5)
 		a.labeled(c, "端口", func() {
 			submitted = a.numberInput(c, "node-port", "专用端口", &a.portValue, 1024, 65535, 1, nil).AutoFocus().Submitted()
 		})
 		if a.State.Settings.AllowLAN {
-			ui.Text(c, "已允许局域网连接：其它设备也可以通过本机地址使用这个端口。").FontSize(12).TextColor(p.warning)
+			ui.Text(c, "已允许局域网连接：其他设备也可以通过本机地址使用这个端口。").FontSize(12).TextColor(p.warning)
 		}
 		if port, ok := a.State.Ports[n.ID]; ok {
 			addr := fmt.Sprintf("127.0.0.1:%d", port)

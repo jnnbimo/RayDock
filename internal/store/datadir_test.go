@@ -83,8 +83,8 @@ func TestMoveLegacyDataFailureKeepsLegacy(t *testing.T) {
 	if _, err := moveLegacyData(legacy, dir); err == nil {
 		t.Fatal("moveLegacyData succeeded into a missing directory")
 	}
-	if fileExists(filepath.Join(dir, "state.json")) {
-		t.Error("state.json was written by a failed move")
+	if exists, err := stateExists(filepath.Join(dir, "state.json")); exists || err != nil {
+		t.Fatalf("stat of destination after failed move: exists=%v err=%v", exists, err)
 	}
 	if got := readTestFile(t, filepath.Join(legacy, "state.json")); got != "old" {
 		t.Errorf("legacy state.json = %q, want it untouched", got)

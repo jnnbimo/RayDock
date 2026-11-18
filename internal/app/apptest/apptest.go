@@ -25,28 +25,22 @@ const (
 	LinkB = "trojan://secret@b.example.com:443#节点B"
 )
 
-// Core stands in for GitHub releases: it writes placeholder files or fails with Err.
-type Core struct {
+// Geo stands in for GitHub's rule data releases: it writes placeholder files, or fails with Err.
+type Geo struct {
 	Tag      string
 	Err      error
 	Installs atomic.Int32 // written by the download goroutine, read by the test
-	Lookups  atomic.Int32 // release lookups (Latest)
 	// Gate, when set, holds an install until it is closed, as a long download would.
 	Gate chan struct{}
-
-	GeoTag      string
-	GeoErr      error
-	GeoInstalls atomic.Int32
-	GeoGate     chan struct{} // like Gate, for rule data updates
 }
 
-func (f *Core) LatestGeo(context.Context, *http.Client) (string, error) { return f.GeoTag, f.GeoErr }
+func (f *Geo) LatestGeo(context.Context, *http.Client) (string, error) { return f.Tag, f.Err }
 
-func (f *Core) InstallGeo(ctx context.Context, _ *http.Client, tag, dir string, progress func(done, total int64)) error {
-	f.GeoInstalls.Add(1)
-	if f.GeoGate != nil {
+func (f *Geo) InstallGeo(ctx context.Context, _ *http.Client, tag, dir string, progress func(done, total int64)) error {
+	f.Installs.Add(1)
+	if f.Gate != nil {
 		select {
-		case <-f.GeoGate:
+		case <-f.Gate:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -60,32 +54,17 @@ func (f *Core) InstallGeo(ctx context.Context, _ *http.Client, tag, dir string, 
 	return nil
 }
 
-func (f *Core) Latest(context.Context, *http.Client) (xray.Release, error) {
-	f.Lookups.Add(1)
-	return xray.Release{Tag: f.Tag}, nil
-}
-
-func (f *Core) Install(ctx context.Context, _ *http.Client, _ xray.Release, dir string, progress func(done, total int64)) error {
-	f.Installs.Add(1)
-	if f.Gate != nil {
-		select {
-		case <-f.Gate:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	if f.Err != nil {
-		return f.Err
-	}
-	progress(50, 100)
-	_ = os.MkdirAll(dir, 0o755)
+// Bundle writes a core of placeholder files to a new directory, as the installer's: they are not
+// executables, so a core started from them fails to start.
+func Bundle(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
 	for _, name := range xray.CoreFiles() {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("placeholder"), 0o644); err != nil {
-			return err
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	progress(100, 100)
-	return nil
+	return dir
 }
 
 type Clip struct{ Text string }
@@ -108,12 +87,10 @@ func (f *Proxy) Apply(s sysproxy.Settings) error {
 type Autostart struct {
 	Mode system.StartMode
 	Err  error
-	Risk error // AdminRisk
 	Sets []system.StartMode
 }
 
 func (f *Autostart) Get() system.StartMode { return f.Mode }
-func (f *Autostart) AdminRisk() error      { return f.Risk }
 func (f *Autostart) Set(m system.StartMode) error {
 	f.Sets = append(f.Sets, m)
 	if f.Err == nil {
@@ -129,22 +106,26 @@ type Harness struct {
 	A     *app.App
 	Clip  *Clip
 	Proxy *Proxy
-	Core  *Core
+	Geo   *Geo
 	Start *Autostart
+	URLs  []string // web pages opened
 	posts chan func()
 }
 
 func New(t *testing.T) *Harness {
 	t.Helper()
-	h := &Harness{Clip: &Clip{}, Proxy: &Proxy{}, Core: &Core{Tag: "v26.10.10"}, Start: &Autostart{}, posts: make(chan func(), 256)}
+	h := &Harness{Clip: &Clip{}, Proxy: &Proxy{}, Geo: &Geo{}, Start: &Autostart{}, posts: make(chan func(), 256)}
 	h.A = app.New(app.Deps{
-		Post:          func(fn func()) { h.posts <- fn },
-		Clipboard:     h.Clip,
-		Proxy:         h.Proxy,
-		SetAppearance: func(int) {},
-		OpenPath:      func(string) {},
-		DataDir:       t.TempDir(),
-		CoreSource:    h.Core,
+		Post:            func(fn func()) { h.posts <- fn },
+		Clipboard:       h.Clip,
+		Proxy:           h.Proxy,
+		SetAppearance:   func(int) {},
+		OpenPath:        func(string) {},
+		OpenURL:         func(u string) { h.URLs = append(h.URLs, u) },
+		DataDir:         t.TempDir(),
+		GeoSource:       h.Geo,
+		BundledCore:     Bundle(t, "placeholder"),
+		ReadCoreVersion: func(string) (string, error) { return xray.MinTUNVersion, nil },
 		CertPin: func(context.Context, *node.Node) (string, error) {
 			h.Pins.Add(1)
 			if h.Pin == "" {

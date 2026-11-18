@@ -42,7 +42,7 @@ var licenseFiles = []string{"LICENSE", "LICENSE-Wintun"}
 func Missing(dir string) []string {
 	var out []string
 	for _, f := range CoreFiles() {
-		if fi, err := os.Stat(filepath.Join(dir, f)); err != nil || fi.Size() == 0 {
+		if fi, err := os.Stat(filepath.Join(dir, f)); err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
 			out = append(out, f)
 		}
 	}
@@ -186,12 +186,16 @@ func Install(ctx context.Context, client *http.Client, rel Release, dir string, 
 
 // CopyCore copies the core in src (e.g. the bundled one) into dir, replacing files like Install.
 func CopyCore(src, dir string, keep []string) error {
-	return copyFiles(src, dir, CoreFiles(), licenseFiles, keep)
+	optional := licenseFiles
+	if !slices.Contains(keep, GeoFiles[0]) && !slices.Contains(keep, GeoFiles[1]) {
+		optional = slices.Concat(licenseFiles, []string{GeoTagFile})
+	}
+	return copyFiles(src, dir, CoreFiles(), optional, keep)
 }
 
 // CopyGeo installs a separately downloaded, verified rule set without touching the executable.
 func CopyGeo(src, dir string) error {
-	return copyFiles(src, dir, GeoFiles, nil, nil)
+	return copyFiles(src, dir, GeoFiles, []string{GeoTagFile}, nil)
 }
 
 func copyFiles(src, dir string, required, optional, keep []string) error {
@@ -287,11 +291,14 @@ func writeFile(path string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, r); err != nil {
-		out.Close()
-		return err
+	_, err = io.Copy(out, r)
+	if err == nil {
+		err = out.Sync()
 	}
-	return out.Close()
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 type progressWriter struct {
@@ -309,5 +316,5 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 
 func exists(path string) bool {
 	fi, err := os.Stat(path)
-	return err == nil && fi.Size() > 0
+	return err == nil && fi.Mode().IsRegular() && fi.Size() > 0
 }

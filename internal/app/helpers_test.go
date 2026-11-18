@@ -79,6 +79,7 @@ func coreConfigWritten(a *App) error {
 
 func placeholderCore(t *testing.T, a *App) {
 	t.Helper()
+	a.CoreVersion = "26.10.21" // the fixture represents a verified installation, not runnable PE bytes
 	if err := os.MkdirAll(a.CoreDir(), 0700); err != nil {
 		t.Fatal(err)
 	}

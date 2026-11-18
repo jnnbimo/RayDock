@@ -37,14 +37,10 @@ func TestImportAndCoreFailure(t *testing.T) {
 	}
 	a.State.SelectedID = a.State.Nodes[1].ID
 	a.Save()
-	// Without a core, connecting downloads it first; a failed download ends the connect with the reason.
-	h.Core.Err = errors.New("HTTP 403")
+	// Without a core, and none bundled to install, the connect ends asking for RayDock to be reinstalled.
+	a.BundledCore = ""
 	a.Connect(a.State.SelectedID, nil)
-	if a.Conn != app.StateConnecting || !a.WaitCore || !a.CoreBusy {
-		t.Fatalf("should wait for the core: conn %v waitCore %v busy %v", a.Conn, a.WaitCore, a.CoreBusy)
-	}
-	h.Wait(t, func() bool { return !a.CoreBusy })
-	if a.Conn != app.StateOff || !strings.Contains(a.ConnErr, "HTTP 403") || a.CoreErr == "" {
+	if a.Conn != app.StateOff || !strings.Contains(a.ConnErr, "请重新安装 RayDock") || a.CoreErr == "" {
 		t.Fatalf("conn %v err %q", a.Conn, a.ConnErr)
 	}
 	st, err := store.Load(a.StatePath())
@@ -64,7 +60,7 @@ func TestConnectTargetIsSelected(t *testing.T) {
 	if got := a.ConnectTarget(); got != second {
 		t.Fatalf("before any connection: %q, want the selected %q", got, second)
 	}
-	h.Core.Err = errors.New("HTTP 403")
+	a.BundledCore = "" // the connect ends at once, without a core
 	a.Connect(first, nil)
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	a.State.SelectedID = second // picked in the list, not connected
@@ -82,6 +78,49 @@ func TestConnectTargetIsSelected(t *testing.T) {
 	a.State.SelectedID = "gone"
 	if got := a.ConnectTarget(); got != first {
 		t.Fatalf("selected node gone: %q, want the last connected %q", got, first)
+	}
+}
+
+// Where the admin start at logon can restart RayDock with administrator rights without asking, TUN has it
+// restart at once, connecting only when connecting is what needs them; the restart is offered instead
+// where it cannot, or in a restart already.
+func TestTUNRestartsThroughAdminTask(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		task       bool // the task can restart RayDock without asking
+		relaunched bool
+		connect    bool // TUN is turned on by connecting rather than by its switch
+		asked      bool
+	}{
+		{"switch", true, false, false, false},
+		{"connect", true, false, true, false},
+		{"no task", false, false, true, true},
+		{"already restarted", true, true, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := apptest.New(t)
+			a := h.A
+			var restarts []bool
+			a.Relaunched = c.relaunched
+			a.RelaunchAdmin = func(connect, ask bool) error {
+				if ask || !c.task {
+					return errors.New("would ask")
+				}
+				restarts = append(restarts, connect)
+				return nil
+			}
+			a.ImportLinks(apptest.LinkA, "")
+			a.State.SelectedID = a.State.Nodes[0].ID
+			if c.connect {
+				a.State.Settings.TUN.Enabled = true
+				a.Connect(a.State.SelectedID, nil)
+			} else {
+				a.SetTUN(true)
+			}
+			if a.AdminPrompt != c.asked || (len(restarts) == 1) == c.asked || !c.asked && restarts[0] != c.connect {
+				t.Fatalf("prompt %v restarts %v", a.AdminPrompt, restarts)
+			}
+		})
 	}
 }
 
@@ -128,7 +167,7 @@ func TestAutostart(t *testing.T) {
 	h.Start.Err = system.ErrUACCancelled
 	a.SetAutostart(system.StartOff)
 	h.Wait(t, func() bool { return !a.StartBusy })
-	if a.StartMode != system.StartAdmin || !strings.Contains(a.StartErr, "UAC") {
+	if a.StartMode != system.StartAdmin || a.StartErr != system.ErrUACCancelled.Error() {
 		t.Fatalf("mode %v err %q", a.StartMode, a.StartErr)
 	}
 }
@@ -235,83 +274,36 @@ func TestSubscriptionRefreshKeepsIDs(t *testing.T) {
 	}
 }
 
-// A connect waiting for the core continues once it is downloaded.
+// A connect waiting for the core continues once the bundled core is installed; a core installed that does
+// not run is installed again at the next check.
 func TestConnectWaitsForCore(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
+	a.ReadCoreVersion = func(exe string) (string, error) {
+		if exe == a.CoreExe() {
+			return "", errors.New("damaged installed executable")
+		}
+		return xray.MinTUNVersion, nil
+	}
 	a.ImportLinks(apptest.LinkA, "")
 	a.Connect(a.State.Nodes[0].ID, nil)
-	if !a.WaitCore {
-		t.Fatal("should wait for the core")
+	if !a.WaitCore || !a.CoreBusy {
+		t.Fatalf("busy %v waitCore %v", a.CoreBusy, a.WaitCore)
 	}
 	// Placeholders are not executables: the start error proves the connect reached starting the core.
 	h.Wait(t, func() bool { return !a.CoreBusy && a.Conn == app.StateOff })
-	if !a.CoreReady() || h.Core.Installs.Load() != 1 || a.WaitCore || !strings.Contains(a.ConnErr, "核心") {
-		t.Fatalf("ready %v installs %d waitCore %v err %q", a.CoreReady(), h.Core.Installs.Load(), a.WaitCore, a.ConnErr)
+	if b, _ := os.ReadFile(a.CoreExe()); string(b) != "placeholder" || a.WaitCore || !strings.Contains(a.ConnErr, "核心") {
+		t.Fatalf("core %q waitCore %v err %q", b, a.WaitCore, a.ConnErr)
 	}
-	// Files present but not runnable (placeholders): the startup check treats them as broken and downloads again.
-	a.EnsureCore()
-	h.Wait(t, func() bool { return h.Core.Installs.Load() == 2 && !a.CoreBusy })
-}
-
-// Startup never looks for a newer core; checking offers one and installs it only when asked again.
-func TestCoreUpdatesOnlyWhenAsked(t *testing.T) {
-	h := apptest.New(t)
-	a := h.A
-	if err := os.MkdirAll(a.CoreDir(), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range xray.CoreFiles() {
-		if err := os.WriteFile(filepath.Join(a.CoreDir(), name), []byte("core"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	a.ReadCoreVersion = func(string) (string, error) { return "26.3.27", nil }
-	h.Core.Tag = "v26.10.10"
 	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
-	if h.Core.Lookups.Load() != 0 || h.Core.Installs.Load() != 0 || a.CoreLatest != "" || a.CoreVersion != "26.3.27" {
-		t.Fatalf("startup: lookups %d installs %d latest %q version %q", h.Core.Lookups.Load(), h.Core.Installs.Load(), a.CoreLatest, a.CoreVersion)
-	}
-	a.CheckCoreUpdate()
-	h.Wait(t, func() bool { return !a.CoreChecking })
-	if a.CoreLatest != "v26.10.10" || h.Core.Installs.Load() != 0 {
-		t.Fatalf("check: latest %q installs %d", a.CoreLatest, h.Core.Installs.Load())
-	}
-	a.CoreLatest, h.Core.Tag = "", "v26.3.27"
-	a.CheckCoreUpdate()
-	h.Wait(t, func() bool { return !a.CoreChecking })
-	if a.CoreLatest != "" || a.CoreNote != "已是最新版本" || h.Core.Installs.Load() != 0 {
-		t.Fatalf("up to date: latest %q note %q installs %d", a.CoreLatest, a.CoreNote, h.Core.Installs.Load())
+	a.FlushLogs()
+	if !slices.ContainsFunc(a.Logs, func(l app.LogLine) bool { return strings.Contains(l.Text, "重新安装自带的 Xray 核心") }) {
+		t.Fatal("a core that does not run was not installed again")
 	}
 }
 
-// With a bundled core, startup copies it instead of downloading.
-func TestBundledCore(t *testing.T) {
-	h := apptest.New(t)
-	a := h.A
-	a.BundledCore = t.TempDir()
-	for _, name := range xray.CoreFiles() {
-		if err := os.WriteFile(filepath.Join(a.BundledCore, name), []byte("bundled"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	a.ImportLinks(apptest.LinkA, "")
-	a.EnsureCore()
-	a.Connect(a.State.Nodes[0].ID, nil) // connect while copying, waiting for the core
-	if !a.CoreBusy || !a.WaitCore {
-		t.Fatalf("busy %v waitCore %v", a.CoreBusy, a.WaitCore)
-	}
-	h.Wait(t, func() bool { return !a.CoreBusy && a.Conn == app.StateOff })
-	if !a.CoreReady() || h.Core.Installs.Load() != 0 {
-		t.Fatalf("ready %v downloads %d", a.CoreReady(), h.Core.Installs.Load())
-	}
-	if b, _ := os.ReadFile(a.CoreExe()); string(b) != "bundled" {
-		t.Fatalf("core in data dir %q", b)
-	}
-}
-
-// Route for core and subscription downloads: our proxy when connected, otherwise another program's system proxy.
+// Route for rule data and subscription downloads: our proxy when connected, otherwise another program's system proxy.
 func TestUpstreamProxy(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
@@ -409,7 +401,7 @@ func TestSpeedTest(t *testing.T) {
 	if err := a.TestSpeed(ids); err == nil || a.SpeedBusy {
 		t.Fatal("speed tests need the core")
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	// The placeholders are not executables: every test reports the core failing to start, one after another.
 	if err := a.TestSpeed(ids); err != nil || !a.SpeedBusy || a.Speed[ids[1]].Phase != "排队" {
@@ -441,7 +433,7 @@ func TestLatencyTest(t *testing.T) {
 	if err := a.TestLatency(ids); err == nil || a.LatencyBusy {
 		t.Fatal("latency tests need the core")
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	if err := a.TestLatency(ids); err != nil || !a.LatencyBusy || !a.Latency[ids[0]].Testing {
 		t.Fatalf("start %v busy %v %+v", err, a.LatencyBusy, a.Latency)
@@ -557,7 +549,7 @@ func TestDedicatedPorts(t *testing.T) {
 	if len(a.PortErrs) != 0 {
 		t.Fatalf("errors before the core %v", a.PortErrs)
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy && a.PortErrs[idA] != "" })
 	if a.PortErrs[idA] != "启动失败，详见日志" || a.PortErrs[idB] != "启动失败，详见日志" {
 		t.Fatalf("errors %v", a.PortErrs)
@@ -586,7 +578,7 @@ func TestDedicatedPortTaken(t *testing.T) {
 	a := h.A
 	a.ImportLinks(apptest.LinkA+"\n"+apptest.LinkB, "")
 	idA, idB := a.State.Nodes[0].ID, a.State.Nodes[1].ID
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -705,7 +697,7 @@ func TestDedicatedPortsUnderTUN(t *testing.T) {
 	// This fixture models a supported core whose process still fails to start (placeholder bytes).
 	a.ReadCoreVersion = func(string) (string, error) { return "26.10.10", nil }
 	a.ImportLinks(apptest.LinkA+"\n"+apptest.LinkB, "")
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	port, p := a.State.Nodes[1].ID, freeTCPPort(t)
 	tag := fmt.Sprintf("\"port-%d\"", p) // its inbound, whose connections take its chain
@@ -738,7 +730,7 @@ func TestUpdateGeo(t *testing.T) {
 	if a.GeoBusy || a.GeoErr == "" {
 		t.Fatal("rule data needs the core first")
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	if v := a.GeoVersion(); !strings.HasPrefix(v, "随核心安装") {
 		t.Fatalf("version %q", v)
@@ -748,12 +740,12 @@ func TestUpdateGeo(t *testing.T) {
 	if err := os.WriteFile(geosite, []byte("earlier package"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	if b, _ := os.ReadFile(geosite); string(b) != "earlier package" {
 		t.Fatalf("geosite.dat after a core update: %q", b)
 	}
-	h.Core.GeoTag = "202610132213"
+	h.Geo.Tag = "202610132213"
 	a.UpdateGeo()
 	h.Wait(t, func() bool { return !a.GeoBusy })
 	if a.State.GeoTag != "202610132213" || a.GeoMsg != "已更新" || a.GeoVersion() != "2026-10-13" {
@@ -765,16 +757,16 @@ func TestUpdateGeo(t *testing.T) {
 	// The same release again: nothing downloaded.
 	a.UpdateGeo()
 	h.Wait(t, func() bool { return !a.GeoBusy })
-	if a.GeoMsg != "已是最新" || h.Core.GeoInstalls.Load() != 1 {
-		t.Fatalf("msg %q installs %d", a.GeoMsg, h.Core.GeoInstalls.Load())
+	if a.GeoMsg != "已是最新" || h.Geo.Installs.Load() != 1 {
+		t.Fatalf("msg %q installs %d", a.GeoMsg, h.Geo.Installs.Load())
 	}
 	// A core update keeps the newer rule data.
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	if b, _ := os.ReadFile(filepath.Join(a.CoreDir(), "geosite.dat")); string(b) != "geo 202610132213" {
 		t.Fatalf("geosite.dat after a core update: %q", b)
 	}
-	h.Core.GeoTag, h.Core.GeoErr = "", errors.New("HTTP 403")
+	h.Geo.Tag, h.Geo.Err = "", errors.New("HTTP 403")
 	a.UpdateGeo()
 	h.Wait(t, func() bool { return !a.GeoBusy })
 	if !strings.Contains(a.GeoErr, "HTTP 403") || a.State.GeoTag != "202610132213" {
@@ -782,62 +774,26 @@ func TestUpdateGeo(t *testing.T) {
 	}
 }
 
-// A core download changes nothing until it is complete: a connect and tests run on the current core
-// meanwhile (only the replacement holds them, TestCoreReplacementHoldsConnection), and a failed download
-// leaves it in place.
-func TestConnectDuringCoreUpdate(t *testing.T) {
-	h := apptest.New(t)
-	a := h.A
-	a.ImportLinks(apptest.LinkA, "")
-	id := a.State.Nodes[0].ID
-	a.InstallCore()
-	h.Wait(t, func() bool { return !a.CoreBusy })
-	h.Core.Gate = make(chan struct{})
-	a.InstallCore()
-	a.Connect(id, nil)
-	if a.WaitCore || a.Conn != app.StateConnecting {
-		t.Fatalf("a download held a connect: waitCore %v conn %v", a.WaitCore, a.Conn)
-	}
-	// The placeholder core fails to run, which proves the start.
-	h.Wait(t, func() bool { return a.Conn == app.StateOff })
-	if !strings.Contains(a.ConnErr, "核心") {
-		t.Fatalf("conn err %q", a.ConnErr)
-	}
-	if _, err := os.Stat(filepath.Join(a.DataDir, "config.json")); err != nil {
-		t.Fatal("the connect did not start the current core")
-	}
-	if err := a.TestLatency([]string{id}); err != nil {
-		t.Fatalf("a download held a test: %v", err)
-	}
-	h.Wait(t, func() bool { return !a.LatencyBusy })
-	h.Core.Err = errors.New("HTTP 502")
-	close(h.Core.Gate)
-	h.Wait(t, func() bool { return !a.CoreBusy })
-	if !strings.Contains(a.CoreErr, "HTTP 502") || !a.CoreReady() {
-		t.Fatalf("core err %q ready %v", a.CoreErr, a.CoreReady())
-	}
-}
-
 // A core install asked for during a rule data update waits for it, then keeps the new rule data.
 func TestCoreInstallWaitsForGeo(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
-	h.Core.GeoTag, h.Core.GeoGate = "202610132213", make(chan struct{})
+	h.Geo.Tag, h.Geo.Gate = "202610132213", make(chan struct{})
 	a.UpdateGeo()
-	a.InstallCore()
-	if a.CoreBusy || h.Core.Installs.Load() != 1 {
+	a.EnsureCore()
+	if a.CoreBusy {
 		t.Fatal("the core install should wait for the rule data")
 	}
-	close(h.Core.GeoGate)
+	close(h.Geo.Gate)
 	h.Wait(t, func() bool { return !a.GeoBusy })
 	if !a.CoreBusy {
 		t.Fatal("the core install should start after the rule data update")
 	}
 	h.Wait(t, func() bool { return !a.CoreBusy })
-	if b, _ := os.ReadFile(filepath.Join(a.CoreDir(), "geoip.dat")); string(b) != "geo 202610132213" || h.Core.Installs.Load() != 2 {
-		t.Fatalf("geoip.dat %q, installs %d", b, h.Core.Installs.Load())
+	if b, _ := os.ReadFile(filepath.Join(a.CoreDir(), "geoip.dat")); string(b) != "geo 202610132213" {
+		t.Fatalf("geoip.dat %q", b)
 	}
 }
 
@@ -871,7 +827,7 @@ func TestPortLogNamesNode(t *testing.T) {
 	if err := a.EditGroup(a.State.Nodes[0].GroupID, app.GroupInput{Name: "默认分组", Back: idB}); err != nil {
 		t.Fatal(err)
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	p := freeTCPPort(t)
 	if err := a.SetNodePort(idA, p); err != nil {

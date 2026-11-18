@@ -6,22 +6,15 @@ import (
 	"raydock/internal/system"
 )
 
-// LoadAutostart reads the start-at-logon mode from the system, the only place it is kept, and warns of a
-// start with administrator rights that others could take over.
+// LoadAutostart reads the start-at-logon mode from the system, the only place it is kept.
 func (a *App) LoadAutostart() {
 	if a.Autostart == nil || a.closing {
 		return
 	}
 	a.StartBusy = true
 	a.jobs.Go(func() {
-		m, risk := a.Autostart.Get(), a.Autostart.AdminRisk()
-		a.Post(func() {
-			a.StartMode, a.StartBusy = m, false
-			if m == system.StartAdmin && risk != nil {
-				a.StartErr = "管理员自启存在风险：" + risk.Error() + "。也可以改为“普通”"
-				a.QueueLog("[RayDock] " + a.StartErr)
-			}
-		})
+		m := a.Autostart.Get()
+		a.Post(func() { a.StartMode, a.StartBusy = m, false })
 	})
 }
 
@@ -39,7 +32,7 @@ func (a *App) SetAutostart(m system.StartMode) {
 			a.StartMode, a.StartBusy = got, false
 			switch {
 			case errors.Is(err, system.ErrUACCancelled):
-				a.StartErr = "已取消：管理员自启需要确认一次 UAC"
+				a.StartErr = system.ErrUACCancelled.Error()
 			case err != nil:
 				a.StartErr = "设置开机自启失败：" + err.Error()
 				a.QueueLog("[RayDock] " + a.StartErr)

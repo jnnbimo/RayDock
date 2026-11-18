@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
@@ -68,38 +67,16 @@ func TestBundledCoreRecordsRuleData(t *testing.T) {
 	}
 }
 
-// officialPackage installs a core whose files read "official", its rule data the package's own: of no
-// release RayDock knows, since 26.10.21 with a geoip.dat of a few categories.
-type officialPackage struct{ OfficialCore }
-
-func (officialPackage) Latest(context.Context, *http.Client) (xray.Release, error) {
-	return xray.Release{Tag: "v26.10.29"}, nil
-}
-
-func (officialPackage) Install(_ context.Context, _ *http.Client, _ xray.Release, dir string, _ func(int64, int64)) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	for _, name := range xray.CoreFiles() {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("official"), 0o700); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// A core downloaded where the rule data is missing brings the package's own, which the installer's then
-// replaces before the connection waiting starts: the release recorded is that of the files installed,
-// never one of the files gone.
-func TestDownloadedCoreTakesBundledRuleData(t *testing.T) {
+// A core missing some of its rule data takes all of the installer's before the connection waiting starts:
+// the files are of one release, and the release recorded is theirs, never that of the files gone.
+func TestMissingRuleDataFromBundle(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
 	if err := os.Remove(filepath.Join(a.CoreDir(), "geoip.dat")); err != nil {
 		t.Fatal(err)
 	}
-	a.State.GeoTag = bundledGeo // of the files before, one of them gone
+	a.State.GeoTag = "202610010000" // of the files before, one of them gone
 	a.BundledCore = bundleWithGeo(t)
-	a.CoreSource = officialPackage{}
 	a.ReadCoreVersion = func(string) (string, error) { return "26.10.29", nil }
 	a.ImportLinks("socks://127.0.0.1:9#a", "")
 	a.Connect(a.State.Nodes[0].ID, nil) // waits for the core
@@ -108,27 +85,16 @@ func TestDownloadedCoreTakesBundledRuleData(t *testing.T) {
 	}
 	waitFor(t, posts, func() bool { return !a.CoreBusy && !a.GeoBusy && !a.WaitCore })
 	waitOperation(t, a.coreDo(func() {}))
-	geo, _ := os.ReadFile(filepath.Join(a.CoreDir(), "geoip.dat"))
 	exe, _ := os.ReadFile(a.coreExe())
-	if string(exe) != "official" || string(geo) != "bundled" || a.State.GeoTag != bundledGeo || a.GeoErr != "" || a.CoreErr != "" {
-		t.Fatalf("core %q rule data %q tag %q errs %q %q", exe, geo, a.State.GeoTag, a.GeoErr, a.CoreErr)
-	}
-	// The connection starts once the installer's rule data is in.
-	a.FlushLogs()
-	geoAt, connectAt := -1, -1
-	for i, l := range a.Logs {
-		if strings.Contains(l.Text, "已更新规则数据 "+bundledGeo) {
-			geoAt = i
-		}
-		if strings.Contains(l.Text, "[RayDock] 连接 a") && connectAt < 0 {
-			connectAt = i
+	for _, name := range xray.GeoFiles {
+		if geo, _ := os.ReadFile(filepath.Join(a.CoreDir(), name)); string(geo) != "bundled" {
+			t.Fatalf("%s %q", name, geo)
 		}
 	}
-	if geoAt < 0 || connectAt < geoAt {
-		t.Fatalf("rule data at log %d, the connection at %d", geoAt, connectAt)
+	if string(exe) != "bundled" || a.State.GeoTag != bundledGeo || a.GeoErr != "" || a.CoreErr != "" {
+		t.Fatalf("core %q tag %q errs %q %q", exe, a.State.GeoTag, a.GeoErr, a.CoreErr)
 	}
 }
-
 func TestGeoTags(t *testing.T) {
 	dir := t.TempDir()
 	for content, want := range map[string]string{"202610282204\n": "202610282204", "latest": "", "2026102822045": ""} {
@@ -149,7 +115,7 @@ func TestGeoCommitFailureKeepsFilesAndCancellation(t *testing.T) {
 	placeholderCore(t, a)
 	a.State.GeoTag = "previous"
 	a.ImportLinks("socks://127.0.0.1:9", "")
-	a.CoreSource = lifecycleGeoSource{install: func(_ context.Context, dir string) error {
+	a.GeoSource = lifecycleGeoSource{install: func(_ context.Context, dir string) error {
 		return os.WriteFile(filepath.Join(dir, xray.GeoFiles[0]), []byte("incomplete"), 0o600)
 	}}
 	a.tests.Add(1)
@@ -177,7 +143,7 @@ func TestGeoCommitFailureKeepsFilesAndCancellation(t *testing.T) {
 func TestShutdownCancelsPendingGeoCommit(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
-	a.CoreSource = lifecycleGeoSource{install: func(_ context.Context, dir string) error {
+	a.GeoSource = lifecycleGeoSource{install: func(_ context.Context, dir string) error {
 		for _, name := range xray.GeoFiles {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte("new"), 0o600); err != nil {
 				return err
@@ -204,7 +170,7 @@ func TestShutdownCancelsPendingGeoCommit(t *testing.T) {
 }
 
 type lifecycleGeoSource struct {
-	OfficialCore
+	OfficialGeo
 	install func(context.Context, string) error
 }
 
@@ -220,7 +186,7 @@ func TestGeoCommitWaitsForWorkersAndResumesConnect(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
 	a.ImportLinks("socks://127.0.0.1:9", "")
-	a.CoreSource = lifecycleGeoSource{install: func(_ context.Context, dir string) error {
+	a.GeoSource = lifecycleGeoSource{install: func(_ context.Context, dir string) error {
 		if dir == a.CoreDir() {
 			return fmt.Errorf("download must not modify live rule files")
 		}

@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -49,7 +50,7 @@ func (a *View) logMenu(c *ui.Context, list ui.Element) {
 	a.contextMenu(c, list, "logs", nil, func() []menuItem {
 		selected := selectedText(list)
 		return []menuItem{
-			{label: "复制", disabled: selected == "", act: func() { a.Clipboard.WriteText(selected) }},
+			{label: "复制", disabled: selected == "", act: func() { a.Clipboard.WriteText(redactLog(selected)) }},
 			{label: "复制全部", disabled: len(a.Logs) == 0, act: func() { a.copyLogs(c) }},
 			{},
 			{label: "清空日志", danger: true, disabled: len(a.Logs) == 0, act: func() { a.Logs = nil }},
@@ -61,8 +62,17 @@ func (a *View) logMenu(c *ui.Context, list ui.Element) {
 func (a *View) copyLogs(c *ui.Context) {
 	var b strings.Builder
 	for _, l := range a.Logs {
-		b.WriteString(l.Text + "\n")
+		b.WriteString(redactLog(l.Text) + "\n")
 	}
 	a.Clipboard.WriteText(b.String())
 	c.Toast(fmt.Sprintf("已复制 %d 行", len(a.Logs)))
+}
+
+var logURL = regexp.MustCompile(`(?i)\b(vless|vmess|trojan|ss|hysteria2|hy2|socks5?h?|https?|wireguard|wg)://[^[:space:]"'<>]+`)
+var logSecret = regexp.MustCompile(`(?i)("(?:password|pass|secretKey|preSharedKey|obfsPassword|uuid|token)"\s*:\s*)"(?:[^"\\]|\\.)*"`)
+
+// Copying logs redacts known credential forms without hiding failure details in the local view.
+func redactLog(s string) string {
+	s = logURL.ReplaceAllString(s, "$1://[已隐藏]")
+	return logSecret.ReplaceAllString(s, `${1}"[已隐藏]"`)
 }

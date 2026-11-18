@@ -30,7 +30,6 @@ type osAutostart struct{ exe string }
 
 func (o osAutostart) Get() system.StartMode        { return system.Autostart(o.exe) }
 func (o osAutostart) Set(m system.StartMode) error { return system.SetAutostart(m, o.exe) }
-func (o osAutostart) AdminRisk() error             { return system.AdminAutostartRisk(o.exe) }
 
 type winProxy struct{}
 
@@ -62,18 +61,39 @@ const (
 	uninstallErrorFile  = "uninstall-error.txt" // in the data directory
 )
 
-// prepareUninstall acquires the application lock only after the running instance completed Shutdown.
-// Errors propagate to NSIS before it deletes any installation files or registration metadata.
-// It moves no data: the proxy backup is restored from the data directory, and from an earlier
-// version's directory that was never moved.
+// prepareUninstall waits for only this installation, and only while the installer holds its reservation.
 func prepareUninstall(dataDir string) error {
+	install := filepath.Dir(dataDir)
 	deadline := time.Now().Add(35 * time.Second)
-	for !mygo.App.RequestSingleInstanceLock() {
+	for {
+		reserved, err := system.UninstallReserved(install)
+		if err != nil {
+			return err
+		}
+		if !reserved {
+			return errors.New("卸载程序未持有安装目录，已停止清理")
+		}
+		release, err := system.TryInstallationSession(install)
+		if err != nil {
+			return err
+		}
+		if release != nil {
+			defer release()
+			break
+		}
 		if time.Now().After(deadline) {
 			return errors.New("RayDock 未能正常退出，卸载已停止；请退出后重试")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	proxyRelease, err := system.TryProxySession()
+	if err != nil {
+		return err
+	}
+	if proxyRelease == nil {
+		return errors.New("另一份 RayDock 正在运行，请先退出")
+	}
+	defer proxyRelease()
 	for _, dir := range []string{dataDir, store.LegacyDataDir()} {
 		if dir == "" {
 			continue
@@ -96,7 +116,8 @@ func main() {
 	}
 	// MyGo keeps its own files (window-state.json) there too.
 	mygo.App.SetPath(mygo.PathUserData, dataDir)
-	if slices.Contains(os.Args[1:], prepareUninstallArg) {
+	// The uninstaller's request is RayDock's only argument (TaskHelper tells why).
+	if len(os.Args) == 2 && os.Args[1] == prepareUninstallArg {
 		// Why it failed is kept for the uninstaller's message to point to (installer.nsh), until it succeeds.
 		report := filepath.Join(dataDir, uninstallErrorFile)
 		if err := prepareUninstall(dataDir); err != nil {
@@ -117,18 +138,48 @@ func main() {
 	if args.waitPID > 0 {
 		system.WaitProcessExit(args.waitPID, 15*time.Second)
 	}
+	install := filepath.Dir(dataDir)
+	if reserved, err := system.UninstallReserved(install); err != nil {
+		fatal(err)
+	} else if reserved {
+		return
+	}
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance gets OnSecondInstance
 	}
-	moveWarning, err := store.PrepareDataDir(dataDir)
+	release, err := system.TryInstallationSession(install)
 	if err != nil {
 		fatal(err)
 	}
-	selfExe, _ := os.Executable()
+	if release == nil {
+		return
+	}
+	defer release()
+	if reserved, err := system.UninstallReserved(install); err != nil {
+		fatal(err)
+	} else if reserved {
+		return
+	}
+	selfExe, err := os.Executable()
+	if err != nil {
+		fatal(err)
+	}
 	// The installer ships the core in resources\core (resources/windows-amd64/core in the repo).
 	bundledCore := ""
 	if res, err := mygo.App.Path(mygo.PathResources); err == nil {
 		bundledCore = filepath.Join(res, "core")
+	}
+	proxyRelease, err := system.TryProxySession()
+	if err != nil {
+		fatal(err)
+	}
+	if proxyRelease == nil {
+		fatal(errors.New("另一份 RayDock 正在运行，请先退出"))
+	}
+	defer proxyRelease()
+	moveWarning, err := store.PrepareDataDir(dataDir)
+	if err != nil {
+		fatal(err)
 	}
 	st, err := loadState(filepath.Join(dataDir, "state.json"))
 	if err != nil {
@@ -168,15 +219,17 @@ func main() {
 		Proxy:         winProxy{},
 		SetAppearance: applyAppearance,
 		OpenPath:      func(p string) { _ = mygo.Shell.OpenPath(p) },
+		OpenURL:       func(u string) { _ = mygo.Shell.OpenExternal(u) },
 		DataDir:       dataDir,
 		Elevated:      system.IsElevated(),
 		Autostart:     osAutostart{selfExe},
-		RelaunchAdmin: func(connect bool) error {
+		Relaunched:    args.waitPID > 0,
+		RelaunchAdmin: func(connect, ask bool) error {
 			args := []string{"--wait-pid=" + strconv.Itoa(os.Getpid())}
 			if connect {
 				args = append(args, "--connect")
 			}
-			if err := system.RelaunchElevated(args); err != nil {
+			if err := system.RelaunchElevated(args, ask); err != nil {
 				return err
 			}
 			// The new process waits for this one, which stops the core and restores the proxy on exit.
@@ -184,7 +237,7 @@ func main() {
 			return nil
 		},
 		FlushDNS:    system.FlushDNS,
-		CoreSource:  app.OfficialCore{},
+		GeoSource:   app.OfficialGeo{},
 		BundledCore: bundledCore,
 		Version:     mygo.App.Version(),
 	}, st)
@@ -193,7 +246,10 @@ func main() {
 	}
 	applyAppearance(st.Settings.Appearance)
 
+	stopUninstallWatch := make(chan struct{})
+	defer close(stopUninstallWatch)
 	mygo.App.WhenReady(func() {
+		go watchUninstall(install, stopUninstallWatch)
 		a.CleanStaleProxy()
 		var tray *mygo.Tray
 		quitting := false
@@ -253,7 +309,9 @@ func main() {
 			}
 			return w
 		}
-		open(args.autostart)
+		// Started at logon, RayDock stays in the tray unless the user asked for its window; restarted with
+		// administrator rights, through the logon task too (RelaunchElevated), it shows it as it was.
+		open(args.autostart && args.waitPID == 0 && !st.Settings.AutostartShow)
 		mygo.Screen.OnDisplaysChanged(func() { fitCurrent(true) }) // resolution, scale or work area
 		show := func() {
 			w := current()
@@ -269,11 +327,7 @@ func main() {
 			w.Focus()
 		}
 		mygo.App.OnSecondInstance(func(argv []string, _ string) {
-			if slices.Contains(argv, prepareUninstallArg) {
-				mygo.App.Quit()
-				return
-			}
-			if !slices.Contains(argv, system.AutostartArg) {
+			if !slices.Contains(argv, prepareUninstallArg) && !slices.Contains(argv, system.AutostartArg) {
 				show()
 			}
 		})
@@ -304,8 +358,33 @@ func main() {
 	})
 	runErr := mygo.App.Run()
 	a.Shutdown() // stop the core, restore the proxy
+	if a.SaveErr != "" {
+		log.Print(a.SaveErr)
+		system.ShowError("RayDock 设置未保存", a.SaveErr)
+	}
 	if runErr != nil {
 		log.Fatal(runErr)
+	}
+}
+
+// watchUninstall asks the UI to quit when its own installer reserves this directory.
+func watchUninstall(install string, done <-chan struct{}) {
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick.C:
+			if reserved, _ := system.UninstallReserved(install); reserved {
+				mygo.RunOnMain(func() {
+					if reserved, _ := system.UninstallReserved(install); reserved {
+						mygo.App.Quit()
+					}
+				})
+				// If the uninstaller cancelled before the callback, keep watching.
+			}
+		}
 	}
 }
 

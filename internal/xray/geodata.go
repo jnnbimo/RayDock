@@ -148,6 +148,9 @@ func download(ctx context.Context, client *http.Client, url, path, want string, 
 	}
 	h := sha256.New()
 	_, err = io.Copy(io.MultiWriter(out, h, pw), resp.Body)
+	if err == nil {
+		err = out.Sync()
+	}
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}

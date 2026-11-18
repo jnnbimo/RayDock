@@ -38,7 +38,7 @@ func TestTaskXML(t *testing.T) {
 	if err := xml.Unmarshal([]byte(src), &task); err != nil {
 		t.Fatal(err)
 	}
-	if task.Exec.Command != exe || task.Exec.Arguments != AutostartArg || task.Exec.WorkingDirectory != `C:\Tools & Apps\<RayDock>` ||
+	if task.Exec.Command != exe || task.Exec.Arguments != AutostartArg+" "+taskArgs || task.Exec.WorkingDirectory != `C:\Tools & Apps\<RayDock>` ||
 		task.Principal.RunLevel != "HighestAvailable" || task.Principal.UserID != "S-1-5-21-1" || task.Priority != 4 {
 		t.Errorf("%+v", task)
 	}
@@ -46,7 +46,7 @@ func TestTaskXML(t *testing.T) {
 
 // The Task Scheduler is reached through its COM interface: a task that does not exist reads as absent.
 func TestTaskSchedulerMissingTask(t *testing.T) {
-	if _, _, ok := taskDetails(`RayDock Test \ no such task`); ok {
+	if _, ok := taskDetails(`RayDock Test \ no such task`); ok {
 		t.Fatal("a missing task reads as present")
 	}
 	if err := deleteTask("RayDock Test no such task"); err != nil {
@@ -58,6 +58,11 @@ func TestTaskSchedulerMissingTask(t *testing.T) {
 func TestTaskHelperArgs(t *testing.T) {
 	if _, ok := TaskHelper([]string{"--connect", AutostartArg}); ok {
 		t.Fatal("ordinary arguments taken for the helper")
+	}
+	// A run of the logon task, which any program of the user may ask for with arguments of its choosing,
+	// passes AutostartArg before them: it never changes the task with the task's administrator rights.
+	if _, ok := TaskHelper([]string{AutostartArg, taskHelperArg + "S-1-5-18"}); ok {
+		t.Fatal("a run of the logon task taken for the helper")
 	}
 	if code := int(hresult(0x80070005)); uint32(code) != 0x80070005 || hresult(uint32(code)).Error() == "" {
 		t.Fatalf("code %x", code)

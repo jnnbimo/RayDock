@@ -223,7 +223,7 @@ func (a *View) trafficCard(c *ui.Context) {
 		})
 		a.trafficTable(c, now)
 	})
-	ui.Text(c, "统计经代理和直连的流量，不含节点的延迟与速度测试").FontSize(11).TextColor(p.muted)
+	ui.Text(c, "统计经代理和直连的流量").FontSize(11).TextColor(p.muted)
 }
 
 func (a *View) rateLegend(c *ui.Context, col ui.Color, label string, rate float64) {

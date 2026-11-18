@@ -19,6 +19,9 @@ func bundleFiles() []string { return append(CoreFiles(), GeoTagFile) }
 // BundleReady trusts a preparation only when its manifest matches every resource and the rules tag.
 // A legacy tag by itself cannot prove that a failed forced preparation did not replace its rule files.
 func BundleReady(dir string) bool {
+	if RecoveryPending(dir) {
+		return false
+	}
 	data, err := os.ReadFile(filepath.Join(dir, bundleManifest))
 	if err != nil || len(data) > 64*1024 || ReadGeoTag(dir) == "" {
 		return false
@@ -99,6 +102,9 @@ func PrepareBundle(ctx context.Context, client *http.Client, rel Release, dir st
 		return err
 	}
 	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if err := RecoverFiles(dir); err != nil {
 		return err
 	}
 	required := append(bundleFiles(), bundleManifest)

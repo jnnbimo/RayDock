@@ -4,8 +4,10 @@ package xray
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -59,5 +61,42 @@ func TestIntegrationExclusiveHandover(t *testing.T) {
 	}
 	if _, err = probe.ViaProxy(context.Background(), o.Port, target.URL, time.Second); err != nil {
 		t.Fatalf("activated listener: %v", err)
+	}
+}
+
+func TestIntegrationResumePartiallyActivatedListeners(t *testing.T) {
+	exe, dir := coreForTest(t), t.TempDir()
+	n := &node.Node{Protocol: node.SOCKS, Host: "127.0.0.1", Port: 9}
+	o := DefaultOptions()
+	o.Port, o.APIPort, o.APIToken = freePort(t), freePort(t), "test-resume-token"
+	p := freePort(t)
+	r := Run{Chain: []*node.Node{n}, Ports: []PortRoute{{Port: p, Chain: []*node.Node{n}}}, Deferred: true}
+	boot := mustBuild(t, o, r)
+	startCore(t, exe, dir, "resume-listeners", boot, nil)
+	r.Deferred = false
+	full := mustBuild(t, o, r)
+	var cfg struct{ Inbounds []json.RawMessage }
+	if err := json.Unmarshal(full, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Inbounds = cfg.Inbounds[:1]
+	first, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := StatsClient(o.APIToken)
+	defer client.CloseIdleConnections()
+	ctx := context.Background()
+	if err := ActivateListeners(ctx, client, o.APIPort, first); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := ActivateListeners(ctx, client, o.APIPort, full); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tags, err := inboundTags(ctx, client, o.APIPort)
+	if err != nil || !tags[tagMixed] || !tags["port-"+strconv.Itoa(p)] {
+		t.Fatalf("incomplete resumed listeners: %v %v", tags, err)
 	}
 }

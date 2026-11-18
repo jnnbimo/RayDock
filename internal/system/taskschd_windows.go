@@ -33,6 +33,7 @@ const (
 	folderGetTask        = 13 // ITaskFolder::GetTask
 	folderDeleteTask     = 15 // ITaskFolder::DeleteTask
 	folderRegisterTask   = 16 // ITaskFolder::RegisterTask
+	registeredTaskRun    = 12 // IRegisteredTask::Run
 	registeredTaskXML    = 20 // IRegisteredTask::get_Xml
 
 	comRelease = 2 // IUnknown::Release
@@ -43,6 +44,7 @@ const (
 	taskCreateOrUpdate        = 0x6
 	taskLogonInteractiveToken = 3
 	hrFileNotFound            = 0x80070002
+	vtBSTR                    = 8
 )
 
 // variant is an empty VARIANT, 24 bytes on 64-bit Windows, where one is passed by reference.
@@ -51,6 +53,10 @@ type variant [24]byte
 // comObject is an interface pointer of a COM object.
 type comObject struct{ p unsafe.Pointer }
 
+// The caller passes COM out-parameters here as uintptr; keep the Go storage
+// fixed and live across this wrapper, not just across the nested SyscallN.
+//
+//go:uintptrescapes
 func (o comObject) call(method int, args ...uintptr) uint32 {
 	vtbl := *(*unsafe.Pointer)(o.p)
 	fn := *(*uintptr)(unsafe.Add(vtbl, method*int(unsafe.Sizeof(uintptr(0)))))
@@ -163,6 +169,39 @@ func deleteTask(name string) error {
 		if hr := folder.call(folderDeleteTask, n.p, 0); hr != 0 && hr != hrFileNotFound {
 			return hresultError(hr)
 		}
+		return nil
+	})
+}
+
+// runTask starts task name now, with params in place of $(Arg0) in its action.
+func runTask(name, params string) error {
+	return withRootFolder(func(folder comObject) error {
+		n, err := newBSTR(name)
+		if err != nil {
+			return err
+		}
+		defer n.free()
+		var task comObject
+		if hr := folder.call(folderGetTask, n.p, uintptr(unsafe.Pointer(&task.p))); hr != 0 {
+			return hresultError(hr)
+		}
+		defer task.release()
+		p, err := newBSTR(params)
+		if err != nil {
+			return err
+		}
+		defer p.free()
+		var v variant // VT_BSTR holding p
+		*(*uint16)(unsafe.Pointer(&v[0])) = vtBSTR
+		*(*uintptr)(unsafe.Pointer(&v[8])) = p.p
+		var running comObject
+		if hr := task.call(registeredTaskRun, uintptr(unsafe.Pointer(&v)), uintptr(unsafe.Pointer(&running.p))); hr != 0 {
+			return hresultError(hr)
+		}
+		if running.p == nil {
+			return errors.New("计划任务没有启动")
+		}
+		running.release()
 		return nil
 	})
 }

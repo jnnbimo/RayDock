@@ -85,8 +85,9 @@ func (a *App) syncIdle(ch change) {
 	} else {
 		var err error
 		if t, err = a.planTarget(coreSpec{opts: a.xrayOptions()}, ch); err != nil {
+			// planTarget returns no plan when a port's config fails: the ports stop, as with any failure.
 			a.markPorts(err.Error())
-			t.proc = nil
+			t = &coreTarget{}
 		}
 	}
 	if t == a.planned || t.proc == cur && (a.planned == nil || a.planned.id == "") {

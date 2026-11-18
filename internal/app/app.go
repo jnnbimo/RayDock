@@ -36,17 +36,19 @@ type Deps struct {
 	Proxy         ProxySystem
 	SetAppearance func(int) // 0 system, 1 light, 2 dark
 	OpenPath      func(string)
+	OpenURL       func(string) // opens a web page in the browser
 	DataDir       string
 	Elevated      bool
-	// RelaunchAdmin restarts elevated and quits; connect makes the new process connect at once.
-	RelaunchAdmin func(connect bool) error
+	// RelaunchAdmin restarts elevated and quits; connect makes the new process connect at once. Without ask
+	// it restarts only where that asks the user nothing (the admin start at logon), and otherwise fails.
+	RelaunchAdmin func(connect, ask bool) error
+	Relaunched    bool // this process is such a restart
 	FlushDNS      func()
 	Autostart     interface {
 		Get() system.StartMode
 		Set(system.StartMode) error
-		AdminRisk() error // why starting with administrator rights is unsafe; nil when it is not
 	}
-	CoreSource      CoreSource
+	GeoSource       GeoSource
 	ReadCoreVersion func(exe string) (string, error) // nil uses xray.Version; tests can replace process I/O
 	// CertPin returns the SHA-256 of the certificate n's server presents (see PinCertificates); nil for
 	// certpin.Fetch through the local network.
@@ -150,22 +152,18 @@ type App struct {
 	servedPorts string            // the dedicated ports last logged (notePorts)
 	portBasis   portSettings      // the settings the dedicated ports follow, as SyncCores last saw them
 
+	SaveErr   string      // a pending write failed; autosave keeps retrying
 	saveDue   bool        // the state changed since it was saved, which saveSoon will
 	saveTimer *time.Timer // saveSoon's
 
-	coreRevision int    // local version checks and installations invalidate older discovery results
+	coreRevision int    // each version check and installation: older checks and port validations are stale
 	CoreVersion  string // verified installed version; empty means unknown
-	CoreBusy     bool   // a core job runs: a version check, or a download or copy and the replacement
+	CoreBusy     bool   // a core job runs: a version check, or installing the bundled core
 	// coreHold keeps everything that runs the core files (connections, ports, tests) from starting while
-	// the files are being checked or replaced; a core download leaves them alone until it is complete.
-	coreHold      bool
-	CoreProgress  float64
-	CoreMsg       string
-	CoreErr       string // last download failure
-	CoreLatest    string // newer release offered: found by CheckCoreUpdate, or bundled with a RayDock upgrade
-	latestBundled bool   // CoreLatest is the bundled core, which UpdateCore installs offline
-	CoreChecking  bool   // CheckCoreUpdate is looking for a release
-	CoreNote      string // result of the last CheckCoreUpdate that offered nothing
+	// the files are being checked or replaced.
+	coreHold bool
+	CoreMsg  string
+	CoreErr  string // why there is no core that runs
 
 	GeoBusy     bool
 	GeoProgress float64
@@ -188,6 +186,10 @@ type App struct {
 	StartBusy     bool
 	StartErr      string
 	SettingsDirty bool // changed while connected, needs a reconnect
+
+	UpdateLatest   string // newer RayDock release found by CheckUpdate, e.g. v0.1.8
+	UpdateChecking bool
+	UpdateNote     string // result of the last CheckUpdate that offered nothing
 
 	OnChange func() // notifies the tray of connection changes
 }
@@ -239,15 +241,21 @@ func (a *App) configPath() string { return filepath.Join(a.DataDir, "config.json
 func (a *App) CoreDir() string    { return filepath.Join(a.DataDir, "core") }
 func (a *App) coreExe() string    { return filepath.Join(a.CoreDir(), xray.ExeName()) }
 
-func (a *App) CoreReady() bool { return len(xray.Missing(a.CoreDir())) == 0 }
+func (a *App) CoreReady() bool {
+	return len(parseVersion(a.CoreVersion)) == 3 && len(xray.Missing(a.CoreDir())) == 0
+}
 
 func (a *App) Save() { _ = a.saveState() }
 
 func (a *App) saveState() error {
-	a.saveDue = false
 	err := store.Save(a.statePath(), a.State)
+	a.saveDue, a.SaveErr = err != nil, ""
 	if err != nil {
-		a.QueueLog("[RayDock] 保存设置失败：" + err.Error())
+		a.SaveErr = "保存设置失败：" + err.Error()
+		a.QueueLog("[RayDock] " + a.SaveErr)
+		if !a.closing {
+			a.scheduleSave(3 * time.Second)
+		}
 	}
 	return err
 }
@@ -289,7 +297,6 @@ func (a *App) Shutdown() {
 	a.pinCore.Stop()
 	a.jobs.Wait()
 	// A download cancelled by the shutdown is not resumed: its files go.
-	_ = os.RemoveAll(a.downloadDir())
 	_ = os.RemoveAll(a.geoDownloadDir())
 	if a.saveTimer != nil {
 		a.saveTimer.Stop()
@@ -324,8 +331,12 @@ const saveDelay = 500 * time.Millisecond
 // to disk. Shutdown saves what is left.
 func (a *App) saveSoon() {
 	a.saveDue = true
+	a.scheduleSave(saveDelay)
+}
+
+func (a *App) scheduleSave(delay time.Duration) {
 	if a.saveTimer == nil {
-		a.saveTimer = time.AfterFunc(saveDelay, func() {
+		a.saveTimer = time.AfterFunc(delay, func() {
 			a.Post(func() {
 				if a.saveDue {
 					a.Save()
@@ -334,7 +345,7 @@ func (a *App) saveSoon() {
 		})
 		return
 	}
-	a.saveTimer.Reset(saveDelay)
+	a.saveTimer.Reset(delay)
 }
 
 // portSettings are the settings the dedicated ports use.

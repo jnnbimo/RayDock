@@ -62,6 +62,10 @@ func (c *Core) start(ctx context.Context, exe, configPath string, config []byte,
 	cmd.Dir = filepath.Dir(exe)
 	cmd.Env = assetEnv(exe)
 	hideWindow(cmd)
+	guard := newProcessGuard()
+	if err := guard.prepare(cmd); err != nil {
+		return fmt.Errorf("无法准备 Xray 进程保护：%w", err)
+	}
 	// Own the pipe: Cmd.Wait closes StdoutPipe before a concurrent scanner necessarily consumed the
 	// final error lines. Startup failure must include the full output, not just the startup banner.
 	stdout, writer, err := os.Pipe()
@@ -74,8 +78,13 @@ func (c *Core) start(ctx context.Context, exe, configPath string, config []byte,
 		stdout.Close()
 		return fmt.Errorf("启动核心失败：%w", err)
 	}
-	writer.Close()                         // only the child keeps the writing end
-	newProcessGuard().add(cmd.Process.Pid) // ends the core with this process
+	writer.Close() // only the child keeps the writing end
+	if err := guard.add(cmd.Process.Pid); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		stdout.Close()
+		return fmt.Errorf("无法保护 Xray 进程，已取消启动：%w", err)
+	}
 	c.mu.Lock()
 	done := make(chan struct{})
 	c.cmd, c.done, c.stopped = cmd, done, false

@@ -87,7 +87,7 @@ func TestSaveAppliesConnectionChanges(t *testing.T) {
 			}
 			tt.Frame()
 			tt.Frame()
-			if tt.HasText("设置已修改，应用时会重新连接，已建立的连接将断开") {
+			if tt.HasText("设置已修改，应用时会重新连接") {
 				t.Fatalf("reconnect banner: %q", tt.Texts())
 			}
 		})

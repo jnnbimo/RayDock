@@ -138,7 +138,7 @@ func (a *View) nodeDialog(c *ui.Context) {
 		if adding {
 			segmented(c.Key("node-mode"), &f.mode, "粘贴链接", "手动填写").Label("添加方式").OnChange(func() { f.err = "" })
 		} else if g := a.GroupByID(f.n.GroupID); g != nil && g.Subscription() {
-			ui.Text(c, "这是订阅分组的节点：更新订阅时，它的配置会被订阅中的内容覆盖。").FontSize(12.5).TextColor(p.warning)
+			ui.Text(c, "订阅节点的修改会在更新订阅时被覆盖。").FontSize(12.5).TextColor(p.warning)
 		}
 		switch {
 		case adding && f.mode == 0:
@@ -204,7 +204,7 @@ func (a *View) showAddedGroup(group string) {
 
 func (a *View) pasteForm(c *ui.Context) {
 	ui.Text(c, "每行一条分享链接：vless、vmess、trojan、ss、hysteria2、socks、http(s)、wireguard。"+
-		"也可以粘贴 Xray JSON（单个出站或完整配置），包括 MASQUE 等没有分享链接的协议。").
+		"也可以粘贴 Xray JSON（单个出站或完整配置）。").
 		FontSize(12.5).TextColor(a.pal.muted).LineHeight(1.5)
 	links := ui.TextArea(c.Key("links"), &a.nf.links).Lines(6, 12).Font("monospace").FontSize(12).AutoFocus().
 		Placeholder("vless://…\n{\"protocol\": \"masque\", …}").Label("分享链接或 JSON")

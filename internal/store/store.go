@@ -40,6 +40,8 @@ type Settings struct {
 	SystemProxy bool `json:"systemProxy"` // set the system proxy while connected
 	AutoConnect bool `json:"autoConnect"` // connect to the last node at start
 	Appearance  int  `json:"appearance"`  // 0 system, 1 light, 2 dark
+	// AutostartShow shows the window when RayDock starts at logon; else it starts in the tray.
+	AutostartShow bool `json:"autostartShow"`
 }
 
 func DefaultSettings() Settings {
@@ -53,7 +55,15 @@ type ProxyBackup struct {
 	Applied  string            `json:"applied"` // the address last written
 	// Pending is the address being written, saved before it is: a write that failed or did not finish
 	// may have left it or Applied in place.
-	Pending string `json:"pending,omitempty"`
+	Pending    string             `json:"pending,omitempty"`
+	Owned      *sysproxy.Settings `json:"owned,omitempty"` // last completed write in the current journal format
+	Transition *ProxyTransition   `json:"transition,omitempty"`
+}
+
+// ProxyTransition is saved before writing any of the WinINet values.
+type ProxyTransition struct {
+	From sysproxy.Settings `json:"from"`
+	To   sysproxy.Settings `json:"to"`
 }
 
 // Owns reports whether system proxy server addr is one RayDock wrote, or was writing.

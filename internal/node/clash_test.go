@@ -64,6 +64,18 @@ rules:
   - MATCH,DIRECT
 `
 
+func TestClashDoesNotSilentlyDropRequiredRoutes(t *testing.T) {
+	for _, tc := range []struct{ config, want string }{
+		{"proxies:\n - {type: socks5, server: example.com, port: 1080, dialer-proxy: upstream}", "dialer-proxy"},
+		{"proxies:\n - {type: wireguard, private-key: k, peers: [{server: a, port: 9}, {server: b, port: 9}]}", "多对端"},
+	} {
+		nodes, errs := ParseClash(tc.config)
+		if len(nodes) != 0 || len(errs) != 1 || !strings.Contains(errs[0].Error(), tc.want) {
+			t.Fatalf("nodes=%v errs=%v", nodes, errs)
+		}
+	}
+}
+
 func TestParseClash(t *testing.T) {
 	text, err := DecodeSubscription([]byte(clashConfig))
 	if err != nil {

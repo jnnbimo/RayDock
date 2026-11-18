@@ -99,7 +99,7 @@ func (a *View) sortHeader(c *ui.Context, label string, col sortColumn, alignEnd 
 	p := a.pal
 	active := a.sortBy == col
 	b := ui.ButtonBase(c.Key(col)).Gap(4).AlignItems(ui.Center).Cursor(ui.CursorPointer).Shrink(0).
-		Label(label).Tooltip("点击排序：升序 → 降序 → 原顺序（原顺序下可拖动节点调整位置）")
+		Label(label).Tooltip("点击切换：升序 → 降序 → 原顺序")
 	if alignEnd {
 		b.Justify(ui.End)
 	} else {

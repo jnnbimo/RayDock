@@ -242,7 +242,8 @@ func TestIntegrationRestartOnChange(t *testing.T) {
 		t.Fatal("a transfer through the dedicated port outlived the core restarted")
 	}
 	restarted("a new core", func() {
-		a.coreJob("install", "安装", func(*http.Client) (string, error) { return root, nil })
+		a.BundledCore = root
+		a.seedCore()
 	})
 	if a.CoreErr != "" || running() != 1 {
 		t.Fatalf("a new core: %q, %d cores", a.CoreErr, running())

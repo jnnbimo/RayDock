@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"raydock/internal/store"
+	"raydock/internal/sysproxy"
 )
 
 // RestoreProxyBackup is the uninstall recovery path after graceful shutdown, including a backup left by
@@ -18,26 +19,52 @@ func RestoreProxyBackup(dataDir string, proxy ProxySystem) error {
 	if st.ProxyBackup == nil {
 		return nil
 	}
-	if _, err = restoreOwnedProxy(proxy, st.ProxyBackup); err != nil {
-		return err
-	}
-	st.ProxyBackup = nil
-	if err = store.Save(path, st); err != nil {
-		return fmt.Errorf("无法保存代理恢复结果：%w", err)
-	}
-	return nil
+	_, err = restoreOwnedProxy(proxy, st.ProxyBackup, func(b *store.ProxyBackup) error {
+		st.ProxyBackup = b
+		return store.Save(path, st)
+	})
+	return err
 }
 
-func restoreOwnedProxy(proxy ProxySystem, b *store.ProxyBackup) (bool, error) {
+// ownsProxy matches each prefix of Apply's Enable, Server, Override write order.
+// While a write is pending its observed baseline supersedes all older addresses.
+func ownsProxy(b *store.ProxyBackup, cur sysproxy.Settings) bool {
+	if t := b.Transition; t != nil {
+		s := t.From
+		if s == cur {
+			return true
+		}
+		s.Enabled = t.To.Enabled
+		if s == cur {
+			return true
+		}
+		s.Server = t.To.Server
+		return s == cur || t.To == cur
+	}
+	if b.Owned != nil {
+		return *b.Owned == cur
+	}
+	return cur.Enabled && b.Owns(cur.Server) // legacy journal, which only recorded addresses
+}
+
+func restoreOwnedProxy(proxy ProxySystem, b *store.ProxyBackup, save func(*store.ProxyBackup) error) (bool, error) {
 	cur, err := proxy.Current()
 	if err != nil {
 		return false, fmt.Errorf("读取系统代理失败：%w", err)
 	}
-	if cur.Enabled && b.Owns(cur.Server) {
+	owned := ownsProxy(b, cur)
+	if owned {
+		next := *b
+		next.Transition = &store.ProxyTransition{From: cur, To: b.Previous}
+		if err := save(&next); err != nil {
+			return false, fmt.Errorf("保存代理恢复信息失败：%w", err)
+		}
 		if err := proxy.Apply(b.Previous); err != nil {
 			return false, fmt.Errorf("恢复系统代理失败：%w", err)
 		}
-		return true, nil
 	}
-	return false, nil
+	if err := save(nil); err != nil {
+		return owned, fmt.Errorf("保存代理恢复结果失败：%w", err)
+	}
+	return owned, nil
 }

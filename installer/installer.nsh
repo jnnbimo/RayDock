@@ -1,3 +1,8 @@
+; The installer owns this handle from confirmation through the end of uninstall.
+; The sharing flags match internal/system/installation_windows.go: readers and deletion are allowed,
+; new writers (including a second installer) are not. The handle is closed automatically on exit.
+Var RayDockReservation
+
 ; Prepare before MyGo removes shortcuts/registration or falls back to terminating a tray process.
 ; RayDock asks its existing instance to quit, waits for its cleanup, recovers a stale owned proxy and
 ; removes only this installation's autostart entries. Every failure prevents file deletion.
@@ -20,12 +25,15 @@ Function un.onInit
   SetErrorLevel 1
   Abort
   prepare:
+    System::Call 'kernel32::CreateFileW(w "$INSTDIR\.raydock-uninstall.lock", i 0x40000000, i 5, p 0, i 4, i 0x00200080, p 0) p .r9'
+    StrCmp $9 -1 leaseFailed
+    StrCpy $RayDockReservation $9
     Call un.PrepareRayDock
     ; Our confirmation replaces the stock confirmation page, whose cleanup would otherwise happen later.
     SetSilent silent
+    Return
+  leaseFailed:
+    SetErrorLevel 1
+    MessageBox MB_OK|MB_ICONSTOP "无法独占 RayDock 安装目录，卸载已停止。" /SD IDOK
+    Abort
 FunctionEnd
-
-!macro customUnInstall
-  ; Recheck immediately before removing files, including recovery after a last-moment process exit.
-  Call un.PrepareRayDock
-!macroend

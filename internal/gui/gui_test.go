@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -64,18 +63,13 @@ func TestImportAndUI(t *testing.T) {
 	if h.A.State.SelectedID != h.A.State.Nodes[1].ID {
 		t.Fatalf("selected %q", h.A.State.SelectedID)
 	}
-	// Without a core, connecting downloads it first; a failed download ends the connect with the reason.
-	h.Core.Err = errors.New("HTTP 403")
+	// Without a core, and none bundled to install, the connect ends with the reason, and the title bar says so.
+	h.A.BundledCore = ""
 	if err := tt.Click("连接开关"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
-	if h.A.Conn != app.StateConnecting || !h.A.WaitCore || !h.A.CoreBusy {
-		t.Fatalf("should wait for the core: conn %v waitCore %v busy %v", h.A.Conn, h.A.WaitCore, h.A.CoreBusy)
-	}
-	h.Wait(t, func() bool { return !h.A.CoreBusy })
-	tt.Frame()
-	if h.A.Conn != app.StateOff || !strings.Contains(h.A.ConnErr, "HTTP 403") || !tt.HasText("重试") {
+	if h.A.Conn != app.StateOff || !strings.Contains(h.A.ConnErr, "请重新安装 RayDock") || !tt.HasText("Xray 核心不可用") || !tt.HasText("重试") {
 		t.Fatalf("conn %v err %q texts %q", h.A.Conn, h.A.ConnErr, tt.Texts())
 	}
 }
@@ -534,7 +528,7 @@ func TestSpeedFromMenu(t *testing.T) {
 	if tt.HasText("测速") {
 		t.Fatalf("no speed test button: %q", tt.Texts())
 	}
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	chooseFromMenu(t, tt, "a.example.com:443", "测速")
 	tt.Frame()
@@ -680,7 +674,7 @@ func TestDragToReorder(t *testing.T) {
 func TestGeoUpdateUI(t *testing.T) {
 	h := apptest.New(t)
 	a := h.A
-	a.InstallCore()
+	a.EnsureCore()
 	h.Wait(t, func() bool { return !a.CoreBusy })
 	v := nodesView(a)
 	tt := ui.NewTester(v.Build, 1180, 1400) // the section is below the fold at the default height
@@ -691,11 +685,18 @@ func TestGeoUpdateUI(t *testing.T) {
 	if !tt.HasText("规则数据") || !tt.HasText("随核心安装") {
 		t.Fatalf("texts %q", tt.Texts())
 	}
-	h.Core.GeoTag = "202610132213"
+	h.Geo.Tag, h.Geo.Gate = "202610132213", make(chan struct{})
 	if err := tt.Click("更新规则"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
+	// The download's progress shows in the version row, beside the button, not in a row of its own.
+	bar, ok := tt.AccessByRole(ui.RoleProgress, "规则数据下载进度")
+	btn, _ := tt.Find("更新规则")
+	if !ok || !tt.HasText("正在下载… 0%") || bar.Bounds.Y > btn.Y+btn.H || bar.Bounds.Y+bar.Bounds.H < btn.Y {
+		t.Fatalf("progress %v %+v button %+v texts %q", ok, bar.Bounds, btn, tt.Texts())
+	}
+	close(h.Geo.Gate)
 	h.Wait(t, func() bool { return !a.GeoBusy })
 	tt.Frame()
 	if !tt.HasText("2026-10-13") || !tt.HasText("已更新") {

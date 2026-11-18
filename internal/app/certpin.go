@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,32 @@ func (a *App) stopPinning() {
 	for j := range a.pinJobs {
 		j.cancel()
 	}
+}
+
+// ResetAutoPin explicitly discards previously learned trust. Never reset a supplied pin.
+func (a *App) ResetAutoPin(id string) error {
+	n := a.NodeByID(id)
+	if n == nil || n.AutoPin == "" {
+		return errors.New("没有可重新读取的自动证书指纹")
+	}
+	if a.closing || a.coreHold || a.pinning[id] || (a.CertPin == nil && !a.CoreReady()) {
+		return errors.New("证书读取暂不可用，请稍后再试")
+	}
+	candidate := *n
+	candidate.AutoPin = ""
+	if !certpin.Needed(&candidate) {
+		return errors.New("该节点不使用自动证书固定")
+	}
+	previous := n.AutoPin
+	n.AutoPin = ""
+	if err := a.saveState(); err != nil {
+		n.AutoPin = previous
+		return err
+	}
+	a.nodeChanged(id)
+	a.SyncCores()
+	a.PinCertificates(id)
+	return nil
 }
 
 // PinCertificates fetches certificates for the requested nodes (all with no ids). File replacement
@@ -123,7 +150,7 @@ func (a *App) pinned(nodes []node.Node, pins []string, errs []error) {
 		n.AutoPin = pins[i]
 		a.nodeChanged(n.ID)
 		changed = append(changed, n.ID)
-		a.QueueLog("[RayDock] 已固定 " + certpin.Describe(n) + " 的证书 " + pins[i] + "（链接要求跳过证书验证，Xray 26 已不支持，改为只信任此证书）")
+		a.QueueLog("[RayDock] 已固定 " + certpin.Describe(n) + " 的证书 " + pins[i] + "，代替链接要求的跳过证书验证")
 	}
 	if len(retry) > 0 {
 		a.PinCertificates(retry...)

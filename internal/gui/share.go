@@ -64,7 +64,7 @@ func (a *View) shareDialog(c *ui.Context) {
 				a.copyMenu(c, ui.Text(c, s.link).Font("monospace").FontSize(12).LineHeight(1.45).Selectable(),
 					"share-link", s.link)
 			})
-			ui.Text(c, "扫码或复制链接即可导入。分享内容包含节点凭据，请勿公开。").
+			ui.Text(c, "链接包含节点凭据，请勿公开。").
 				FontSize(12.5).TextColor(p.muted).TextAlign(ui.Center)
 		})
 	}

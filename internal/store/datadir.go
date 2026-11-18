@@ -59,15 +59,17 @@ func LegacyDataDir() string {
 // An error means RayDock must not start: it would begin with empty data and, saving it, never move the
 // earlier data. A warning reports leftovers of a move that otherwise succeeded.
 func PrepareDataDir(dir string) (warning, err error) {
-	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+	if fi, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("无法在程序所在目录创建数据目录 %s：%w。请把 RayDock 放到当前用户可写的位置", dir, err)
 		}
-		if err := system.PrivateDir(dir); err != nil {
-			return nil, fmt.Errorf("无法限制数据目录 %s 的访问权限：%w", dir, err)
-		}
 	} else if err != nil {
 		return nil, err
+	} else if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("数据路径 %s 不是普通目录", dir)
+	}
+	if err := system.PrivateDir(dir); err != nil {
+		return nil, fmt.Errorf("无法限制数据目录 %s 的访问权限：%w", dir, err)
 	}
 	return moveLegacyData(LegacyDataDir(), dir)
 }
@@ -80,15 +82,22 @@ var legacyData = []string{"traffic.json", "window-state.json", "core", "state.js
 // is copied last: a move cut short leaves dir without it and is done again at the next start, while the
 // earlier directory is only removed once all of its data is in dir.
 func moveLegacyData(legacy, dir string) (warning, err error) {
-	if legacy == "" || strings.EqualFold(filepath.Clean(legacy), filepath.Clean(dir)) ||
-		!fileExists(filepath.Join(legacy, "state.json")) || fileExists(filepath.Join(dir, "state.json")) {
+	if legacy == "" || strings.EqualFold(filepath.Clean(legacy), filepath.Clean(dir)) {
 		return nil, nil
+	}
+	have, err := stateExists(filepath.Join(dir, "state.json"))
+	if err != nil || have {
+		return nil, err
+	}
+	have, err = stateExists(filepath.Join(legacy, "state.json"))
+	if err != nil || !have {
+		return nil, err
 	}
 	for _, name := range legacyData {
 		src, dst := filepath.Join(legacy, name), filepath.Join(dir, name)
 		fi, err := os.Stat(src)
 		switch {
-		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, fs.ErrNotExist) && name != "state.json":
 			continue
 		case err != nil:
 		case fi.IsDir():
@@ -139,6 +148,9 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	_, err = io.Copy(tmp, in)
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -151,7 +163,16 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func fileExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.Mode().IsRegular()
+func stateExists(path string) (bool, error) {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("检查 %s：%w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return false, fmt.Errorf("%s 不是普通文件", path)
+	}
+	return true, nil
 }

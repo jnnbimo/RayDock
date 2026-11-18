@@ -10,9 +10,13 @@ import (
 )
 
 func (a *View) savedToast(c *ui.Context, name string) {
+	if a.SaveErr != "" {
+		c.Toast("已应用，但保存失败，稍后自动重试")
+		return
+	}
 	message := "已保存 " + name
 	if a.Conn != app.StateOff && a.SettingsDirty {
-		message += "。有设置尚未应用到当前连接，请点击顶部的“应用”。"
+		message += "，部分设置尚未应用，请点击顶部的“应用”"
 	}
 	c.Toast(message)
 }

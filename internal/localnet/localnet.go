@@ -24,16 +24,17 @@ func IsFakeIP(ip netip.Addr) bool {
 
 // Interface is the physical interface of the default route.
 type Interface struct {
-	Index int
-	Name  string           // as net.InterfaceByName and Xray's sockopt.interface know it
-	DNS   []netip.AddrPort // its DNS servers, IPv4 first
+	Index  int // IPv4
+	Index6 int
+	Name   string           // as net.InterfaceByName and Xray's sockopt.interface know it
+	DNS    []netip.AddrPort // its DNS servers, IPv4 first
 }
 
 // Dialer returns a dialer whose sockets are bound to iface; with a nil iface routing decides.
 func Dialer(iface *Interface) *net.Dialer {
 	d := &net.Dialer{}
 	if iface != nil {
-		d.Control = bind(iface.Index)
+		d.Control = bind(iface)
 	}
 	return d
 }
@@ -43,7 +44,7 @@ func Dialer(iface *Interface) *net.Dialer {
 func ListenPacket(ctx context.Context, iface *Interface, network string) (net.PacketConn, error) {
 	lc := net.ListenConfig{}
 	if iface != nil {
-		lc.Control = bind(iface.Index)
+		lc.Control = bind(iface)
 	}
 	return lc.ListenPacket(ctx, network, ":0")
 }

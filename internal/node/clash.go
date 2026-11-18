@@ -143,6 +143,9 @@ func (c clashMap) header(name string) string {
 }
 
 func fromClash(c clashMap) (Node, error) {
+	if c.str("dialer-proxy") != "" {
+		return Node{}, errors.New("节点要求 dialer-proxy，不能在丢弃前置代理的情况下导入")
+	}
 	n := Node{Name: c.str("name"), Host: c.str("server"), Port: c.num("port")}
 	switch typ := strings.ToLower(c.str("type")); typ {
 	case "ss":
@@ -319,7 +322,7 @@ func clashHysteria2(n *Node, c clashMap) error {
 	return nil
 }
 
-// clashWireGuard reads the simplified single-peer form, or the first of peers, which overrides it.
+// clashWireGuard accepts a single peer, inline or in peers.
 func clashWireGuard(n *Node, c clashMap) error {
 	n.Protocol, n.SecretKey, n.MTU = WireGuard, c.secret("private-key"), c.num("mtu")
 	var addrs []string
@@ -335,10 +338,15 @@ func clashWireGuard(n *Node, c clashMap) error {
 	n.LocalAddress = strings.Join(addrs, ",")
 	peer := c
 	if peers, _ := c["peers"].([]any); len(peers) > 0 {
-		if p, ok := peers[0].(map[string]any); ok {
-			peer = p
-			n.Host, n.Port = peer.str("server"), peer.num("port")
+		if len(peers) != 1 {
+			return errors.New("多对端 WireGuard 请使用完整 Xray 出站 JSON 导入")
 		}
+		p, ok := peers[0].(map[string]any)
+		if !ok {
+			return errors.New("WireGuard 对端不是键值对")
+		}
+		peer = p
+		n.Host, n.Port = peer.str("server"), peer.num("port")
 	}
 	n.PublicKey, n.PreSharedKey = peer.secret("public-key"), peer.secret("pre-shared-key")
 	if n.SecretKey == "" || n.PublicKey == "" {

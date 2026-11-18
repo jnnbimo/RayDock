@@ -78,10 +78,15 @@ func TestIntegrationGeoDownloadBesideQueuedStart(t *testing.T) {
 	a.State.Settings.Port, _ = freePort()
 	a.State.Settings.SystemProxy = false
 	a.ImportLinks("socks://127.0.0.1:9#node", "")
+	a.EnsureCore()
+	waitFor(t, posts, func() bool { return !a.CoreBusy })
+	if !a.CoreReady() {
+		t.Fatal(a.CoreErr)
+	}
 	gap, finish := make(chan struct{}), make(chan struct{})
 	finishDownload := sync.OnceFunc(func() { close(finish) })
 	defer finishDownload()
-	a.CoreSource = lifecycleGeoSource{install: func(ctx context.Context, dir string) error {
+	a.GeoSource = lifecycleGeoSource{install: func(ctx context.Context, dir string) error {
 		if dir == a.CoreDir() {
 			return fmt.Errorf("download unexpectedly targeted the live directory")
 		}

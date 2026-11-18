@@ -16,7 +16,7 @@ func (a *App) UpdateGeo() {
 		return
 	}
 	if !a.CoreReady() {
-		a.GeoErr = "请先安装 Xray 核心"
+		a.GeoErr = "缺少 Xray 核心，请重新安装 RayDock"
 		return
 	}
 	a.GeoBusy, a.GeoProgress, a.GeoErr, a.GeoMsg = true, 0, "", ""
@@ -25,14 +25,17 @@ func (a *App) UpdateGeo() {
 		defer client.CloseIdleConnections()
 		ctx, cancel := context.WithTimeout(a.workCtx, 10*time.Minute)
 		defer cancel()
-		tag, err := a.CoreSource.LatestGeo(ctx, client)
+		tag, err := a.GeoSource.LatestGeo(ctx, client)
 		if err == nil && tag != current {
 			err = os.RemoveAll(dir)
 			if err == nil {
 				err = os.MkdirAll(dir, 0o755)
 			}
 			if err == nil {
-				err = a.CoreSource.InstallGeo(ctx, client, tag, dir, a.progress(func(p float64) { a.GeoProgress = p }))
+				err = a.GeoSource.InstallGeo(ctx, client, tag, dir, a.progress(func(p float64) { a.GeoProgress = p }))
+			}
+			if err == nil {
+				err = os.WriteFile(filepath.Join(dir, xray.GeoTagFile), []byte(tag+"\n"), 0o600)
 			}
 		}
 		a.Post(func() {
@@ -56,6 +59,18 @@ func (a *App) UpdateGeo() {
 }
 
 func (a *App) geoDownloadDir() string { return filepath.Join(a.DataDir, "geo-download") }
+
+// progress reports a download's progress, on the UI thread to set, at most every 100 ms and at its end.
+func (a *App) progress(set func(float64)) func(done, total int64) {
+	last := time.Now()
+	return func(done, total int64) {
+		if total > 0 && (time.Since(last) > 100*time.Millisecond || done == total) {
+			last = time.Now()
+			p := float64(done) / float64(total)
+			a.Post(func() { set(p) })
+		}
+	}
+}
 
 // bundledGeoTag is the release of the rule data RayDock brings (xray.GeoTagFile), "" when unknown.
 func (a *App) bundledGeoTag() string {
@@ -101,7 +116,12 @@ func (a *App) geoDone(tag, previous string, err error) {
 		a.GeoMsg = "已更新"
 		a.QueueLog("[RayDock] 已更新规则数据 " + tag)
 	}
-	if a.WaitCore {
+	if err != nil && xray.RecoveryPending(a.CoreDir()) {
+		a.CoreVersion, a.CoreErr = "", a.GeoErr
+		if a.WaitCore {
+			a.endConnection(a.CoreErr)
+		}
+	} else if a.WaitCore {
 		a.resumeConnect(change{geo: updated})
 	} else if updated {
 		a.RenewCores(change{geo: true})

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -46,6 +45,31 @@ func TestPinEditedWhileInFlight(t *testing.T) {
 	}
 }
 
+func TestResetAutoPinRequiresExplicitAction(t *testing.T) {
+	a, posts, _ := newTestApp(t)
+	var reads atomic.Int32
+	a.CertPin = func(context.Context, *node.Node) (string, error) {
+		if reads.Add(1) == 1 {
+			return "first-pin", nil
+		}
+		return "rotated-pin", nil
+	}
+	a.ImportLinks("trojan://p@localhost:443?allowInsecure=1", "")
+	id := a.State.Nodes[0].ID
+	waitFor(t, posts, func() bool { return a.NodeByID(id).AutoPin == "first-pin" })
+	a.PinCertificates(id)
+	if a.pinning[id] {
+		t.Fatal("automatic check replaced trust")
+	}
+	if err := a.ResetAutoPin(id); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, posts, func() bool { return a.NodeByID(id).AutoPin == "rotated-pin" })
+	if reads.Load() != 2 {
+		t.Fatal("reset did not request exactly one lookup")
+	}
+}
+
 func TestCoreReplacementCancelsAndResumesPinWorkers(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
@@ -73,8 +97,8 @@ func TestCoreReplacementCancelsAndResumesPinWorkers(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("pin not started")
 	}
-	src := coreFilesIn(t, "new")
-	a.coreJob("install", "安装", func(*http.Client) (string, error) { return src, nil })
+	a.BundledCore = coreFilesIn(t, "new")
+	a.seedCore()
 	waitFor(t, posts, func() bool { return !a.CoreBusy && a.State.Nodes[0].AutoPin == "pin" })
 	select {
 	case <-cancelled:

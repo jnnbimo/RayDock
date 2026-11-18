@@ -2,7 +2,6 @@ package gui
 
 import (
 	"cmp"
-	"fmt"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -108,9 +107,6 @@ func (a *View) connectionStatus(c *ui.Context) {
 		title, col = "正在连接…", p.warning
 		if a.WaitCore {
 			sub = cmp.Or(a.CoreMsg, "正在准备 Xray 核心")
-			if a.CoreProgress > 0 {
-				sub = fmt.Sprintf("%s %d%%", sub, int(a.CoreProgress*100))
-			}
 		} else if n := a.NodeByID(a.ActiveID); n != nil {
 			sub = n.Label()
 		}

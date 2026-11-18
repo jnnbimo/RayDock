@@ -779,6 +779,7 @@ func TestIntegrationLocalNetwork(t *testing.T) {
 	defer cancel()
 	ips, err := r.LookupNetIP(ctx, "ip4", "www.baidu.com")
 	if err != nil || len(ips) == 0 {
+		core.Stop() // finish the log writer before reading the failure output
 		t.Fatalf("lookup %v %v\n%s", ips, err, coreLog.String())
 	}
 	d, err := probe.TCP(ctx, localnet.Dialer(iface), netip.AddrPortFrom(ips[0], 443), 5*time.Second)

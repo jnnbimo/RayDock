@@ -20,16 +20,33 @@ var ErrUACCancelled = errors.New("已取消管理员授权")
 // IsElevated reports whether the process runs with administrator rights.
 func IsElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
-// RelaunchElevated starts this executable again through UAC without waiting.
-// The caller is expected to quit.
-func RelaunchElevated(args []string) error {
+// RelaunchElevated starts this executable again with administrator rights, without waiting; the caller is
+// expected to quit. The user's admin logon task starts it without asking; without one, UAC asks, unless
+// ask is false: then it starts nothing and fails.
+func RelaunchElevated(args []string, ask bool) error {
 	exe, err := os.Executable()
 	if err != nil {
+		return err
+	}
+	if err = runAdminTask(exe, args); err == nil || !ask {
 		return err
 	}
 	_, err = shellExecute(exe, args, windows.SW_SHOWNORMAL, false)
 	return err
 }
+
+// splitAdmin reports whether the user is an administrator whose processes run with a filtered token, as
+// with UAC on: a task with the highest rights runs with the full one, elevated. A standard user's runs
+// with the user's own rights.
+func splitAdmin() bool {
+	var kind, n uint32
+	err := windows.GetTokenInformation(windows.GetCurrentProcessToken(), windows.TokenElevationType,
+		(*byte)(unsafe.Pointer(&kind)), uint32(unsafe.Sizeof(kind)), &n)
+	return err == nil && kind == tokenElevationTypeLimited
+}
+
+// tokenElevationTypeLimited is TokenElevationTypeLimited of TOKEN_ELEVATION_TYPE.
+const tokenElevationTypeLimited = 3
 
 // runElevated runs a program through UAC, hidden, and waits for its exit code.
 func runElevated(exe string, args ...string) (uint32, error) {

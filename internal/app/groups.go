@@ -250,29 +250,44 @@ func (a *App) replaceGroupNodes(groupID string, fresh []node.Node) {
 		fresh[i].GroupID = groupID
 		pos[i] = len(old) + i
 	}
-	// Match exact configs first across the whole list: variants of one endpoint
-	// must not exchange their IDs/ports just because the subscription reordered them.
-	for pass := range 2 {
-		for i := range fresh {
-			if matched[i] {
-				continue
-			}
-			for j := range old {
-				if taken[j] {
-					continue
-				}
-				sameConfig := node.SameConfig(&old[j], &fresh[i])
-				if (pass == 0 && sameConfig) || (pass == 1 && node.SameEndpoint(&old[j], &fresh[i])) {
-					taken[j], matched[i] = true, true
-					fresh[i].ID, pos[i] = old[j].ID, j
-					if sameConfig {
-						fresh[i].AutoPin = old[j].AutoPin // the server is the same
-					} else {
-						a.nodeChanged(old[j].ID)
-					}
-					break
-				}
-			}
+	// Match exact configs first across the whole list. Index the still available old nodes
+	// by endpoint on the second pass; every old position is consumed exactly once.
+	match := func(i, j int, exact bool) {
+		taken[j], matched[i] = true, true
+		fresh[i].ID, pos[i] = old[j].ID, j
+		if exact {
+			fresh[i].AutoPin = old[j].AutoPin
+		} else {
+			a.nodeChanged(old[j].ID)
+		}
+	}
+	configs := map[node.Node][]int{}
+	for j := range old {
+		key := node.ConfigKey(&old[j])
+		configs[key] = append(configs[key], j)
+	}
+	for i := range fresh {
+		key := node.ConfigKey(&fresh[i])
+		if matches := configs[key]; len(matches) > 0 {
+			match(i, matches[0], true)
+			configs[key] = matches[1:]
+		}
+	}
+	endpoints := map[node.Endpoint][]int{}
+	for j := range old {
+		if !taken[j] {
+			key := node.EndpointKey(&old[j])
+			endpoints[key] = append(endpoints[key], j)
+		}
+	}
+	for i := range fresh {
+		if matched[i] {
+			continue
+		}
+		key := node.EndpointKey(&fresh[i])
+		if matches := endpoints[key]; len(matches) > 0 {
+			match(i, matches[0], false)
+			endpoints[key] = matches[1:]
 		}
 	}
 	order := make([]int, len(fresh))
@@ -423,6 +438,9 @@ func fetchSubscription(ctx context.Context, client *http.Client, target string) 
 	nodes, errs := node.ParseMany(text)
 	if len(nodes) == 0 {
 		return nil, errs, errors.New("订阅中没有可用的节点")
+	}
+	if len(nodes) > 10000 {
+		return nil, nil, errors.New("订阅节点数超过 10000，未替换原分组")
 	}
 	return nodes, errs, nil
 }

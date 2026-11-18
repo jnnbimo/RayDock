@@ -63,9 +63,9 @@ func TestSystemTaskXML(t *testing.T) {
 		t.Fatalf("the task was rejected: %v", err)
 	}
 	t.Cleanup(func() { _ = deleteTask(name) })
-	cmd, _, ok := taskDetails(name)
-	if !ok || !samePath(cmd, exe) {
-		t.Fatalf("command %q ok %v, want %q", cmd, ok, exe)
+	task, ok := taskDetails(name)
+	if !ok || !samePath(task.cmd, exe) {
+		t.Fatalf("command %q ok %v, want %q", task.cmd, ok, exe)
 	}
 	if err := registerTask(name, src); err != nil {
 		t.Fatalf("replacing the task: %v", err)
@@ -73,7 +73,7 @@ func TestSystemTaskXML(t *testing.T) {
 	if err := deleteTask(name); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := taskDetails(name); ok {
+	if _, ok := taskDetails(name); ok {
 		t.Fatal("the task is still there")
 	}
 }

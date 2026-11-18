@@ -167,13 +167,18 @@ func NewID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// SameEndpoint matches subscription identities so server settings can change without
-// losing selection, ordering, dedicated ports or chain references. Not for deduplication.
-func SameEndpoint(a, b *Node) bool {
-	return a.Protocol == b.Protocol && a.Host == b.Host && a.Port == b.Port &&
-		a.UUID == b.UUID && a.Username == b.Username && a.Password == b.Password && a.SecretKey == b.SecretKey &&
-		a.Network == b.Network && a.Path == b.Path && a.Outbound == b.Outbound
+// Endpoint identifies subscription variants that can retain their identity when other settings change.
+type Endpoint struct {
+	Protocol, Host                                               string
+	Port                                                         int
+	UUID, Username, Password, SecretKey, Network, Path, Outbound string
 }
+
+func EndpointKey(n *Node) Endpoint {
+	return Endpoint{n.Protocol, n.Host, n.Port, n.UUID, n.Username, n.Password, n.SecretKey, n.Network, n.Path, n.Outbound}
+}
+
+func SameEndpoint(a, b *Node) bool { return EndpointKey(a) == EndpointKey(b) }
 
 // SameConfig compares all connection settings, ignoring only identity, display metadata and AutoPin.
 func SameConfig(a, b *Node) bool { return ConfigKey(a) == ConfigKey(b) }

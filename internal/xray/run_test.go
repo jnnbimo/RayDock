@@ -57,7 +57,7 @@ func TestBuildChain(t *testing.T) {
 	m := decodeJSON(t, mustBuild(t, DefaultOptions(), Run{Chain: chain}))
 	// The chain's tags start with what its config hashes to.
 	p := strings.TrimSuffix(proxyTag(chain, nil), tagProxy)
-	if !strings.HasPrefix(p, nodePrefix) || len(p) != len(nodePrefix)+9 {
+	if !strings.HasPrefix(p, nodePrefix) || len(p) != len(nodePrefix)+64+1 {
 		t.Fatalf("prefix %q", p)
 	}
 	for path, want := range map[string]any{

@@ -17,7 +17,7 @@ func (a *View) routeSection(c *ui.Context) {
 		if idx < 0 {
 			idx = slices.Index(strategies, xray.DefaultOptions().DomainStrategy)
 		}
-		f.row(c, "域名策略", "按域名未命中规则时，是否解析成 IP 再匹配 IP 规则", func() {
+		f.row(c, "域名策略", "域名未命中规则时，是否解析为 IP 再匹配", func() {
 			segmented(c.Key("domain-strategy"), &idx, "仅匹配域名", "未命中时解析", "总是解析").Label("域名策略").
 				OnChange(func() {
 					s.DomainStrategy = strategies[idx]
@@ -101,7 +101,7 @@ func (a *View) rulesSection(c *ui.Context) {
 					{"full: / keyword: / regexp:", "完整匹配、包含关键字、正则表达式"},
 					{"geosite:netflix", "规则库中的域名分类"},
 					{"1.2.3.4、10.0.0.0/8、geoip:jp", "IP、网段、规则库中的国家或地区"},
-					{"chrome.exe、process:C:\\app\\x.exe", "进程名或完整路径（TUN 模式下最有用）"},
+					{"chrome.exe、process:C:\\app\\x.exe", "进程名或完整路径"},
 				} {
 					ui.Text(c, kv[0]).Font("monospace").TextColor(p.text)
 					ui.Text(c, kv[1]).TextColor(p.muted)
@@ -114,7 +114,7 @@ func (a *View) rulesSection(c *ui.Context) {
 func (a *View) dnsSection(c *ui.Context) {
 	p := a.pal
 	s := &a.State.Settings
-	a.section(c, "DNS", "国内域名用国内 DNS 解析，其余经代理用远程 DNS 解析", func(f *form) {
+	a.section(c, "DNS", "国内域名用国内 DNS，其余用远程 DNS", func(f *form) {
 		dnsField := func(key, title, hint string, value *string, placeholder string) {
 			f.block(c, func() {
 				ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
@@ -130,14 +130,14 @@ func (a *View) dnsSection(c *ui.Context) {
 			})
 		}
 		dnsField("dns-direct", "国内 DNS", "直连查询", &s.DirectDNS, "223.5.5.5")
-		dnsField("dns-remote", "远程 DNS", "经代理查询", &s.RemoteDNS, "8.8.8.8")
+		dnsField("dns-remote", "远程 DNS", "默认经代理查询", &s.RemoteDNS, "8.8.8.8")
 		f.block(c, func() {
 			ui.Text(c, "支持 IP、IP:端口、https://（DoH）、tcp://、quic+local:// 与 localhost（系统 DNS）。").
 				FontSize(12).TextColor(p.muted)
 		})
 		strategies := []string{"UseIPv4", "UseIP", "UseIPv6"}
 		idx := max(slices.Index(strategies, s.DNSStrategy), 0)
-		f.row(c, "解析的地址类型", "域名解析返回的 IP 地址类型", func() {
+		f.row(c, "解析的地址类型", "", func() {
 			segmented(c.Key("dns-strategy"), &idx, "仅 IPv4", "IPv4 + IPv6", "仅 IPv6").Label("解析的地址类型").
 				OnChange(func() {
 					s.DNSStrategy = strategies[idx]
@@ -168,16 +168,20 @@ func (a *View) dnsSection(c *ui.Context) {
 func (a *View) geoSection(c *ui.Context) {
 	p := a.pal
 	a.section(c, "规则数据", "geoip: 与 geosite: 规则使用的 IP 与域名分类数据", func(f *form) {
-		status := "来自 Loyalsoldier/v2ray-rules-dat，每日发布"
+		// A download shows its progress in the row; installing the files, after it, shows its message.
+		downloading := a.GeoBusy && a.GeoMsg == ""
+		status := "来自 Loyalsoldier/v2ray-rules-dat"
 		switch {
-		case a.GeoBusy:
-			status = "正在下载…"
+		case downloading:
+			status = fmt.Sprintf("正在下载… %d%%", int(a.GeoProgress*100))
 		case a.GeoMsg != "":
 			status = a.GeoMsg
 		}
 		version := a.GeoVersion()
 		f.row(c, "版本", status, func() {
 			switch {
+			case downloading:
+				ui.Progress(c, a.GeoProgress).Width(120).Label("规则数据下载进度")
 			case a.GeoBusy:
 				ui.Spinner(c).Size(14, 14)
 			case version != "":
@@ -190,11 +194,6 @@ func (a *View) geoSection(c *ui.Context) {
 				a.UpdateGeo()
 			}
 		})
-		if a.GeoBusy {
-			f.block(c, func() {
-				ui.Progress(c, a.GeoProgress).Label("规则数据下载进度")
-			})
-		}
 		if a.GeoErr != "" {
 			f.block(c, func() {
 				a.copyMenu(c, ui.Text(c, a.GeoErr).FontSize(12).TextColor(p.danger).Selectable(), "geo-error", a.GeoErr)

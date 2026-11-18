@@ -374,8 +374,7 @@ func tlsSettings(n *node.Node, sni string, utls bool) obj {
 func Warnings(n *node.Node) []string {
 	var w []string
 	if n.Insecure && n.Pin() == "" && n.VerifyName == "" && (n.Security == "tls" || n.Protocol == node.Hysteria2) {
-		w = append(w, "节点要求跳过证书验证，但 Xray 26 已移除 allowInsecure，且尚未取得服务器证书，将按正常证书校验连接；"+
-			"服务器使用自签名证书时会失败，取得证书后会自动固定并重新连接，也可以在编辑节点时填写证书指纹")
+		w = append(w, "节点要求跳过证书验证，Xray 26 已不支持；取得服务器证书前按正常校验连接，取得后自动固定并重新连接")
 	}
 	return w
 }

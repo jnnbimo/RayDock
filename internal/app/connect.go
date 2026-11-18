@@ -66,7 +66,7 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 		a.ConnErr = "TUN 模式需要管理员权限"
 		a.State.SelectedID, a.State.LastID = id, id // restarted elevated, it connects to this node
 		a.Save()
-		a.AdminPrompt = true
+		a.needAdmin(true)
 		return
 	}
 	chain, err := a.Chain(n)
@@ -113,17 +113,14 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 	a.Save()
 	a.changed()
 	if a.coreHold || !a.coreUsable(opts.TUN.Enabled) {
-		// The core files are being checked or replaced, missing or too old: the change is made once that is
-		// done (resumeConnect), with these settings. The core running meanwhile goes on.
+		// The core files are being checked or replaced, missing, unverified or too old: the change is made
+		// once that is done (resumeConnect), with these settings, or ends when no core can serve it. The core
+		// running meanwhile goes on.
 		a.WaitCore, a.waitOpts = true, opts
-		switch {
-		case a.CoreBusy || a.coreHold:
+		if a.CoreBusy || a.coreHold {
 			a.QueueLog("[RayDock] Xray 核心文件正在准备，完成后自动连接")
-		case a.CoreReady() && opts.TUN.Enabled && a.CoreVersion == "":
-			a.EnsureCore() // verify the existing executable before allowing TUN
-		default:
-			a.QueueLog("[RayDock] Xray 核心尚未就绪或版本过旧，下载完成后自动连接")
-			a.InstallCore()
+		} else {
+			a.EnsureCore() // installs the bundled core where it is missing, broken or newer
 		}
 		return
 	}
@@ -153,8 +150,17 @@ func (a *App) connect(id string, opts xray.Options, toast func(string), ch chang
 // resumeConnect makes the change of the connection that waited for the core files (WaitCore), with the
 // settings it was asked with; ch renews the core if it reads files replaced meanwhile.
 func (a *App) resumeConnect(ch change) {
-	if a.WaitCore {
-		a.connect(a.ActiveID, a.waitOpts, nil, ch)
+	if !a.WaitCore {
+		return
+	}
+	if a.NodeByID(a.ActiveID) == nil {
+		a.endConnection("等待核心期间，连接节点已不存在")
+		return
+	}
+	a.ConnErr = ""
+	a.connect(a.ActiveID, a.waitOpts, nil, ch)
+	if a.WaitCore && a.ConnErr != "" {
+		a.endConnection(a.ConnErr)
 	}
 }
 
@@ -273,17 +279,30 @@ func (a *App) SetTUN(on bool) {
 	a.State.Settings.TUN.Enabled = on
 	a.Save()
 	if on && !a.Elevated {
-		a.AdminPrompt = true
+		a.needAdmin(a.Conn != StateOff)
 		return
 	}
 	a.Reconnect()
 }
 
+// needAdmin is reached when TUN needs administrator rights RayDock lacks; connect tells whether RayDock is
+// to connect with them. Where the admin start at logon can, RayDock restarts with them at once, its task
+// asking nothing; otherwise the user is offered the restart (AdminPrompt), as when RayDock already is such
+// a restart, still without them.
+func (a *App) needAdmin(connect bool) {
+	if !a.Relaunched && a.RelaunchAdmin != nil && a.RelaunchAdmin(connect && a.ConnectTarget() != "", false) == nil {
+		return
+	}
+	a.AdminPrompt = true
+}
+
+// RestartAsAdmin restarts RayDock with administrator rights, asking through UAC where the admin start at
+// logon cannot; restarted, it connects to the node selected.
 func (a *App) RestartAsAdmin() error {
 	if a.RelaunchAdmin == nil {
 		return errors.New("当前环境不支持提权")
 	}
-	return a.RelaunchAdmin(a.ConnectTarget() != "")
+	return a.RelaunchAdmin(a.ConnectTarget() != "", true)
 }
 
 // ConnectTarget prefers the selected node, then the last connected node; empty means neither exists.
@@ -384,61 +403,66 @@ func (a *App) SyncProxy() {
 	}
 }
 
-// Persist both proxy addresses before writing so failures and crashes remain recoverable.
+// Before every write, persist the observed state and every intermediate state Apply may leave.
 func (a *App) enableProxy() {
 	a.ProxyErr = ""
-	addr := a.ProxyAddr()
-	previousBackup := a.State.ProxyBackup
-	backup := store.ProxyBackup{}
-	if previousBackup != nil {
-		backup = *previousBackup
+	cur, err := a.Proxy.Current()
+	if err != nil {
+		a.ProxyErr = "读取系统代理失败：" + err.Error()
+		return
 	}
-	if previousBackup == nil {
-		prev, err := a.Proxy.Current()
-		if err != nil {
-			a.ProxyErr = "读取系统代理失败：" + err.Error()
+	target := sysproxy.Settings{Enabled: true, Server: a.ProxyAddr(), Override: sysproxy.Bypass}
+	backup := store.ProxyBackup{Previous: cur}
+	if b := a.State.ProxyBackup; b != nil {
+		if !ownsProxy(b, cur) {
+			a.ProxyErr = "系统代理已被其他程序修改，未覆盖其设置"
 			return
 		}
-		backup.Previous = prev
+		if b.Transition == nil && b.Owned != nil && cur == target {
+			return
+		}
+		backup = *b
 	}
-	if backup.Applied != addr {
-		backup.Pending = addr
-	}
-	a.State.ProxyBackup = &backup
-	if err := a.saveState(); err != nil {
-		a.State.ProxyBackup = previousBackup
+	backup.Pending = target.Server
+	backup.Transition = &store.ProxyTransition{From: cur, To: target}
+	if err := a.saveProxyBackup(&backup); err != nil {
 		a.ProxyErr = "保存代理恢复信息失败，未修改系统代理：" + err.Error()
 		return
 	}
-	if err := a.Proxy.Apply(sysproxy.Settings{Enabled: true, Server: addr, Override: sysproxy.Bypass}); err != nil {
-		// Either address may be in place now: both stay recorded.
+	if err := a.Proxy.Apply(target); err != nil {
 		a.ProxyErr = "设置系统代理失败：" + err.Error()
 		return
 	}
-	if backup.Pending != "" {
-		backup.Applied, backup.Pending = addr, ""
-		a.State.ProxyBackup = &backup
-		a.Save() // saved or not, the addresses recorded before include addr
+	settled := backup
+	settled.Applied, settled.Pending, settled.Owned, settled.Transition = target.Server, "", &target, nil
+	if err := a.saveProxyBackup(&settled); err != nil {
+		a.ProxyErr = "保存代理设置结果失败：" + err.Error()
 	}
 }
 
-// restoreProxy restores the previous system proxy unless another program changed it since.
+func (a *App) saveProxyBackup(b *store.ProxyBackup) error {
+	old := a.State.ProxyBackup
+	a.State.ProxyBackup = b
+	if err := a.saveState(); err != nil {
+		a.State.ProxyBackup = old
+		return err
+	}
+	return nil
+}
+
 func (a *App) restoreProxy() {
-	b := a.State.ProxyBackup
-	if b == nil {
+	if a.State.ProxyBackup == nil {
 		return
 	}
-	owned, err := restoreOwnedProxy(a.Proxy, b)
+	owned, err := restoreOwnedProxy(a.Proxy, a.State.ProxyBackup, a.saveProxyBackup)
 	if err != nil {
 		a.ProxyErr = err.Error()
 		return
 	}
 	if !owned {
-		a.QueueLog("[RayDock] 系统代理已被其它程序修改，保持不动")
+		a.QueueLog("[RayDock] 系统代理已被其他程序修改，保持不动")
 	}
-	a.State.ProxyBackup = nil
 	a.ProxyErr = ""
-	a.Save()
 }
 
 func (a *App) proxyActive() bool { return a.State.ProxyBackup != nil }

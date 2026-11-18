@@ -1,71 +1,103 @@
 package app
 
 import (
-	"context"
 	"errors"
-	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"raydock/internal/sysproxy"
 	"raydock/internal/xray"
 )
 
-// The bundled core offered as an update is installed from the bundle, offline.
-func TestUpdateToBundledCore(t *testing.T) {
+// A newer bundled core, as a RayDock upgrade brings, is installed at start, offline; one no newer is not.
+func TestNewerBundledCoreInstalled(t *testing.T) {
 	a, posts, _ := newTestApp(t)
-	src := &countingSource{}
-	a.CoreSource = src
 	placeholderCore(t, a)
 	if err := os.WriteFile(a.coreExe(), []byte("old"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	a.BundledCore = t.TempDir()
-	for _, name := range xray.CoreFiles() {
-		if err := os.WriteFile(filepath.Join(a.BundledCore, name), []byte("new"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	a.BundledCore = coreFilesIn(t, "new")
+	version := map[string]string{"old": "26.9.30", "new": "26.10.21"}
 	a.ReadCoreVersion = func(exe string) (string, error) {
-		if b, _ := os.ReadFile(exe); string(b) == "old" {
-			return "26.9.30", nil
+		b, _ := os.ReadFile(exe)
+		return version[string(b)], nil
+	}
+	a.EnsureCore()
+	waitFor(t, posts, func() bool { return !a.CoreBusy })
+	if b, _ := os.ReadFile(a.coreExe()); string(b) != "new" || a.CoreVersion != "26.10.21" || a.CoreErr != "" {
+		t.Fatalf("core %q version %q err %q", b, a.CoreVersion, a.CoreErr)
+	}
+	// The same version again: nothing is copied.
+	if err := os.WriteFile(a.coreExe(), []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	version["old"] = "26.10.21"
+	a.EnsureCore()
+	waitFor(t, posts, func() bool { return !a.CoreBusy })
+	if b, _ := os.ReadFile(a.coreExe()); string(b) != "old" {
+		t.Fatalf("an equal bundle was installed: %q", b)
+	}
+}
+
+// A missing core is installed from the bundle; without one, only reinstalling RayDock helps, and a
+// connection waiting for the core ends with that.
+func TestMissingCore(t *testing.T) {
+	a, posts, _ := newTestApp(t)
+	a.ImportLinks("socks://127.0.0.1:9", "")
+	a.Connect(a.State.Nodes[0].ID, nil)
+	if a.Conn != StateOff || !strings.Contains(a.ConnErr, "请重新安装 RayDock") || a.CoreErr != a.ConnErr {
+		t.Fatalf("no bundle: conn %v err %q core err %q", a.Conn, a.ConnErr, a.CoreErr)
+	}
+	a.BundledCore = coreFilesIn(t, "bundled")
+	a.ReadCoreVersion = func(string) (string, error) { return "26.10.21", nil }
+	a.Connect(a.State.Nodes[0].ID, nil)
+	if !a.WaitCore || !a.CoreBusy || a.CoreErr != "" {
+		t.Fatalf("bundle: wait %v busy %v err %q", a.WaitCore, a.CoreBusy, a.CoreErr)
+	}
+	// Placeholders are not executables: the start error proves the connect reached starting the core.
+	waitFor(t, posts, func() bool { return !a.CoreBusy && a.Conn == StateOff })
+	if b, _ := os.ReadFile(a.coreExe()); string(b) != "bundled" || !strings.Contains(a.ConnErr, "核心") {
+		t.Fatalf("core %q err %q", b, a.ConnErr)
+	}
+}
+
+// A core that does not run is installed again from the bundle.
+func TestBrokenCoreReinstalled(t *testing.T) {
+	a, posts, _ := newTestApp(t)
+	placeholderCore(t, a)
+	a.BundledCore = coreFilesIn(t, "bundled")
+	a.ReadCoreVersion = func(exe string) (string, error) {
+		if b, _ := os.ReadFile(exe); string(b) != "bundled" {
+			return "", errors.New("not an executable")
 		}
 		return "26.10.21", nil
 	}
-	// Connected, the newer bundle is offered rather than installed at start.
-	a.Conn = StateOn
 	a.EnsureCore()
 	waitFor(t, posts, func() bool { return !a.CoreBusy })
-	if a.CoreLatest != "26.10.21" || !a.latestBundled {
-		t.Fatalf("offered %q bundled %v", a.CoreLatest, a.latestBundled)
-	}
-	a.Conn = StateOff
-	a.UpdateCore()
-	waitFor(t, posts, func() bool { return !a.CoreBusy })
-	if src.latest != 0 || a.CoreVersion != "26.10.21" || a.CoreLatest != "" || a.latestBundled {
-		t.Fatalf("lookups %d version %q offered %q bundled %v err %q", src.latest, a.CoreVersion, a.CoreLatest, a.latestBundled, a.CoreErr)
-	}
-	// An offer found online is downloaded.
-	a.CoreLatest = "v99.0.0"
-	a.UpdateCore()
-	waitFor(t, posts, func() bool { return !a.CoreBusy })
-	if src.latest != 1 {
-		t.Fatalf("lookups %d", src.latest)
+	if b, _ := os.ReadFile(a.coreExe()); string(b) != "bundled" || a.CoreVersion != "26.10.21" || a.CoreErr != "" {
+		t.Fatalf("core %q version %q err %q", b, a.CoreVersion, a.CoreErr)
 	}
 }
 
-type countingSource struct {
-	OfficialCore
-	latest int
-}
-
-func (s *countingSource) Latest(context.Context, *http.Client) (xray.Release, error) {
-	s.latest++
-	return xray.Release{}, errors.New("offline")
+// TUN needs a core new enough; with none, the connection ends asking for a newer RayDock.
+func TestTUNCoreTooOld(t *testing.T) {
+	a, posts, _ := newTestApp(t)
+	placeholderCore(t, a)
+	a.CoreVersion = ""
+	a.ReadCoreVersion = func(string) (string, error) { return "26.3.27", nil }
+	a.Elevated = true
+	a.State.Settings.TUN.Enabled = true
+	a.ImportLinks("socks://127.0.0.1:9", "")
+	a.Connect(a.State.Nodes[0].ID, nil)
+	waitFor(t, posts, func() bool { return a.Conn == StateOff })
+	if !strings.Contains(a.ConnErr, xray.MinTUNVersion) || !strings.Contains(a.ConnErr, "请更新 RayDock") {
+		t.Fatalf("err %q", a.ConnErr)
+	}
+	if err := coreConfigWritten(a); err != nil {
+		t.Fatal("the old core started", err)
+	}
 }
 
 func TestTUNWaitsForVersionBeforeStarting(t *testing.T) {
@@ -73,8 +105,8 @@ func TestTUNWaitsForVersionBeforeStarting(t *testing.T) {
 	placeholderCore(t, a)
 	a.Elevated = true
 	a.State.Settings.TUN.Enabled = true
-	a.CoreSource = inspectingCoreSource{observed: make(chan string, 1)}
 	gate := make(chan struct{})
+	a.CoreVersion = ""
 	a.ReadCoreVersion = func(string) (string, error) { <-gate; return xray.MinTUNVersion, nil }
 	a.ImportLinks("socks://127.0.0.1:9", "")
 	if a.coreUsable(true) {
@@ -145,68 +177,30 @@ func TestTUNStartupUsesNewerBundle(t *testing.T) {
 	}
 }
 
-type gatedReleaseSource struct {
-	OfficialCore
-	started, release chan struct{}
-}
-
-func (s gatedReleaseSource) Latest(ctx context.Context, _ *http.Client) (xray.Release, error) {
-	close(s.started)
-	select {
-	case <-s.release:
-		return xray.Release{Tag: "v99.1.1"}, nil
-	case <-ctx.Done():
-		return xray.Release{}, ctx.Err()
-	}
-}
-
-func TestStaleReleaseCannotOverrideInstallation(t *testing.T) {
-	a, posts, _ := newTestApp(t)
-	placeholderCore(t, a)
-	a.CoreVersion = "26.10.10"
-	source := gatedReleaseSource{started: make(chan struct{}), release: make(chan struct{})}
-	a.CoreSource = source
-	a.CheckCoreUpdate()
-	select {
-	case <-source.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("lookup not started")
-	}
-	a.CoreSource = inspectingCoreSource{observed: make(chan string, 4)}
-	a.InstallCore()
-	waitFor(t, posts, func() bool { return !a.CoreBusy })
-	revision, installErr := a.coreRevision, a.CoreErr
-	close(source.release)
-	select {
-	case f := <-posts:
-		f()
-	case <-time.After(5 * time.Second):
-		t.Fatal("no old release result")
-	}
-	if a.CoreBusy || a.coreRevision != revision || a.CoreLatest != "" || a.CoreErr != installErr {
-		t.Fatal("stale release changed newer installation state")
-	}
-}
-
 func TestInstalledVersionMustBeVerified(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
 	a.CoreVersion = "26.10.10"
 	a.ReadCoreVersion = func(string) (string, error) { return "99.1.1", errors.New("invalid executable") }
-	src := coreFilesIn(t, "new")
-	a.coreJob("install", "安装", func(*http.Client) (string, error) { return src, nil })
+	a.BundledCore = coreFilesIn(t, "new")
+	a.seedCore()
 	waitFor(t, posts, func() bool { return !a.CoreBusy })
-	if a.CoreVersion != "" || a.coreUsable(true) || !strings.Contains(a.CoreErr, "invalid executable") {
-		t.Fatalf("unverified version trusted: %q %q", a.CoreVersion, a.CoreErr)
+	if a.CoreVersion != "26.10.10" || !a.coreUsable(true) || !strings.Contains(a.CoreErr, "invalid executable") {
+		t.Fatalf("known-good version not preserved: %q %q", a.CoreVersion, a.CoreErr)
+	}
+	if b, _ := os.ReadFile(a.coreExe()); string(b) != "inert test placeholder" {
+		t.Fatalf("invalid candidate replaced the installed file: %q", b)
+	}
+	a.CoreVersion = ""
+	if a.coreUsable(false) {
+		t.Fatal("unverified files allowed a non-TUN core start")
 	}
 }
 
-func TestLocalReadinessDoesNotWaitForReleaseLookup(t *testing.T) {
+// A verified core is used at once.
+func TestConnectUsesVerifiedCore(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
-	gate := make(chan struct{})
-	defer close(gate)
-	a.CoreSource = inspectingCoreSource{observed: make(chan string, 1), gate: gate}
 	a.ReadCoreVersion = func(string) (string, error) { return "26.10.10", nil }
 	a.EnsureCore()
 	waitFor(t, posts, func() bool { return !a.CoreBusy })
@@ -218,69 +212,6 @@ func TestLocalReadinessDoesNotWaitForReleaseLookup(t *testing.T) {
 	waitFor(t, posts, func() bool { return a.Conn == StateOff })
 	if !strings.Contains(a.ConnErr, "核心") {
 		t.Fatal("did not try verified core", a.ConnErr)
-	}
-}
-
-type inspectingCoreSource struct {
-	OfficialCore
-	observed chan string
-	gate     <-chan struct{}
-}
-
-func (s inspectingCoreSource) Latest(ctx context.Context, c *http.Client) (xray.Release, error) {
-	if s.gate != nil {
-		select {
-		case <-s.gate:
-		case <-ctx.Done():
-			return xray.Release{}, ctx.Err()
-		}
-	}
-	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/", nil)
-	host := ""
-	if proxy := c.Transport.(*http.Transport).Proxy; proxy != nil {
-		u, _ := proxy(req)
-		if u != nil {
-			host = u.Host
-		}
-	}
-	s.observed <- host
-	return xray.Release{}, errors.New("test: no download")
-}
-
-// A core download goes through the connection, which stays up meanwhile; without one, through another
-// program's system proxy, else direct.
-func TestCoreUpdateDownloadRoute(t *testing.T) {
-	for _, connected := range []bool{false, true} {
-		for _, previous := range []string{"", "127.0.0.1:3128"} {
-			t.Run(fmt.Sprint(connected, previous), func(t *testing.T) {
-				a, posts, p := newTestApp(t)
-				p.cur = sysproxy.Settings{Enabled: previous != "", Server: previous}
-				want := previous
-				if connected {
-					a.Conn, a.runningPort = StateOn, a.State.Settings.Port
-					a.SyncProxy()
-					want = a.ProxyAddr()
-				}
-				observed := make(chan string, 1)
-				a.CoreSource = inspectingCoreSource{observed: observed}
-				a.InstallCore()
-				if connected && (a.Conn != StateOn || a.State.ProxyBackup == nil) {
-					t.Fatalf("a download disconnected: %v", a.Conn)
-				}
-				select {
-				case host := <-observed:
-					if host != want {
-						t.Fatalf("download route=%q, want %q", host, want)
-					}
-				case <-time.After(5 * time.Second):
-					t.Fatal("no release request")
-				}
-				waitFor(t, posts, func() bool { return !a.CoreBusy })
-				if connected && a.Conn != StateOn {
-					t.Fatalf("a failed download disconnected: %v", a.Conn)
-				}
-			})
-		}
 	}
 }
 
@@ -296,8 +227,8 @@ func TestCoreReplacementKeepsConnection(t *testing.T) {
 	defer release()
 	a.SyncProxy()
 	applied, running, since := p.cur, a.planned, a.Since
-	src := coreFilesIn(t, "new")
-	a.coreJob("install", "安装", func(*http.Client) (string, error) { return src, nil })
+	a.BundledCore = coreFilesIn(t, "new")
+	a.seedCore()
 	waitFor(t, posts, func() bool { return a.coreHold })
 	if a.TestLatency([]string{id}) == nil {
 		t.Fatal("a test started on files being replaced")
@@ -318,21 +249,20 @@ func TestCoreReplacementKeepsConnection(t *testing.T) {
 	}
 }
 
-func TestCoreUpdateDisconnectCancelsResume(t *testing.T) {
+// Disconnecting while the core is replaced is not undone when the replacement ends.
+func TestCoreReplacementDisconnectCancelsResume(t *testing.T) {
 	a, posts, _ := newTestApp(t)
 	placeholderCore(t, a)
 	a.ImportLinks("socks://a.example:1080#a", "")
 	a.Conn, a.ActiveID = StateOn, a.State.Nodes[0].ID
-	gate := make(chan struct{})
-	a.CoreSource = inspectingCoreSource{observed: make(chan string, 1), gate: gate}
-	a.InstallCore()
+	a.BundledCore = coreFilesIn(t, "new")
+	a.seedCore()
 	a.Disconnect()
-	close(gate)
 	waitFor(t, posts, func() bool { return !a.CoreBusy })
 	waitOperation(t, a.coreDo(func() {}))
 	drainPosts(posts)
 	if a.Conn != StateOff {
-		t.Fatalf("disconnect during update resumed connection: %v", a.Conn)
+		t.Fatalf("disconnect during the replacement resumed the connection: %v", a.Conn)
 	}
 	if err := coreConfigWritten(a); err != nil {
 		t.Fatalf("cancelled resume started a core: %v", err)

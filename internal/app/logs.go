@@ -8,6 +8,11 @@ import (
 
 func (a *App) QueueLog(line string) {
 	a.logMu.Lock()
+	if len(a.logQueued) == 2*MaxLogs {
+		copy(a.logQueued, a.logQueued[MaxLogs:])
+		clear(a.logQueued[MaxLogs:])
+		a.logQueued = a.logQueued[:MaxLogs]
+	}
 	a.logQueued = append(a.logQueued, line)
 	a.logMu.Unlock()
 }

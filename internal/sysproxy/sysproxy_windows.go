@@ -29,11 +29,17 @@ func Current() (Settings, error) {
 	}
 	defer k.Close()
 	var s Settings
-	if v, _, err := k.GetIntegerValue("ProxyEnable"); err == nil {
-		s.Enabled = v != 0
+	v, _, err := k.GetIntegerValue("ProxyEnable")
+	if err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return Settings{}, err
 	}
-	s.Server, _, _ = k.GetStringValue("ProxyServer")
-	s.Override, _, _ = k.GetStringValue("ProxyOverride")
+	s.Enabled = v != 0
+	if s.Server, _, err = k.GetStringValue("ProxyServer"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return Settings{}, err
+	}
+	if s.Override, _, err = k.GetStringValue("ProxyOverride"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return Settings{}, err
+	}
 	return s, nil
 }
 
